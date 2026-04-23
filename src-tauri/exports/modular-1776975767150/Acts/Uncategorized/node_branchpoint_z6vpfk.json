@@ -1,0 +1,26 @@
+{
+  "id": "node_branchpoint_z6vpfk",
+  "type": "BranchPoint",
+  "name": "BranchPoint Node",
+  "layerTags": [],
+  "connectedFrom": [
+    "node_scene_6v9ovz"
+  ],
+  "connectedTo": [],
+  "parameters": {
+    "conditionType": "playerChoice",
+    "branches": [],
+    "choices": [
+      {
+        "id": "choice_yy2y",
+        "text": "Схватить Сайласа за горло и прижать к стене.",
+        "nextNode": "node_scene_78woti"
+      },
+      {
+        "id": "choice_l2vd",
+        "text": "Молча положить на стол тяжелый мешочек с золотом.",
+        "nextNode": "node_scene_alx079"
+      }
+    ]
+  }
+}

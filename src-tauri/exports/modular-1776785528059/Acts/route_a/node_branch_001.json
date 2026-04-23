@@ -1,0 +1,29 @@
+{
+  "id": "node_branch_001",
+  "type": "BranchPoint",
+  "name": "Branch: Anna Trust",
+  "position": {
+    "x": 820,
+    "y": 160
+  },
+  "layerTags": [
+    "route_a",
+    "day_1"
+  ],
+  "connectedFrom": [
+    "node_scene_001"
+  ],
+  "connectedTo": [
+    "node_scene_002"
+  ],
+  "parameters": {
+    "conditionType": "relationCheck",
+    "branches": [
+      {
+        "label": "Trust",
+        "condition": "anna_affinity >= 40",
+        "nextNode": "node_scene_002"
+      }
+    ]
+  }
+}

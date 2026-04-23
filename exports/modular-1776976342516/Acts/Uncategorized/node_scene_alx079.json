@@ -1,0 +1,32 @@
+{
+  "id": "node_scene_alx079",
+  "type": "Scene",
+  "name": "2B",
+  "layerTags": [],
+  "connectedFrom": [],
+  "connectedTo": [],
+  "parameters": {
+    "actingCharacters": [
+      {
+        "characterId": "mc",
+        "presetState": "",
+        "relationships": ""
+      },
+      {
+        "characterId": "silas",
+        "presetState": "",
+        "relationships": ""
+      }
+    ],
+    "locationId": "tavern",
+    "timeOfDay": "evening",
+    "toneAndMood": "Спокойный, алчный.",
+    "narrativeAction": "Реакция Сайласа на действия МС. Жадность пересиливает страх.",
+    "goal": "Сайлас забирает награду и добровольно достает из кармана окровавленный амулет, предупреждая МС об опасности.",
+    "constraints": "Без драки и криков.",
+    "triggers": [],
+    "dialogueVariants": [],
+    "defaultNextNode": "",
+    "visualImportant": false
+  }
+}

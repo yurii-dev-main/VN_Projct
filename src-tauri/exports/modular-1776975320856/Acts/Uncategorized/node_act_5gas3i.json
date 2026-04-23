@@ -1,0 +1,25 @@
+{
+  "id": "node_act_5gas3i",
+  "type": "Act",
+  "name": "Act Node",
+  "layerTags": [],
+  "connectedFrom": [],
+  "connectedTo": [
+    "node_scene_6v9ovz"
+  ],
+  "parameters": {
+    "order": 1,
+    "title": "Act 1",
+    "description": "",
+    "requiredFlags": [],
+    "overrides": [
+      {
+        "id": "override_mobwv6ja_951v8",
+        "targetId": "mc",
+        "property": "Status",
+        "newValue": "Уставший инквизитор, который недавно потерял напарника. Мрачный, говорит короткими фразами."
+      }
+    ],
+    "isStart": true
+  }
+}

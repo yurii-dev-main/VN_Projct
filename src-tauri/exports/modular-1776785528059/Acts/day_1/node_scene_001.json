@@ -1,0 +1,74 @@
+{
+  "id": "node_scene_001",
+  "type": "Scene",
+  "name": "Meeting Anna in the Lab",
+  "position": {
+    "x": 430,
+    "y": 180
+  },
+  "layerTags": [
+    "day_1",
+    "route_a"
+  ],
+  "connectedFrom": [
+    "node_act_001"
+  ],
+  "connectedTo": [
+    "node_branch_001",
+    "node_scene_002"
+  ],
+  "parameters": {
+    "actingCharacters": [
+      {
+        "characterId": "mc",
+        "presetState": "curious",
+        "relationships": ""
+      },
+      {
+        "characterId": "anna",
+        "presetState": "distrustful",
+        "relationships": "mc: suspicious"
+      },
+      {
+        "characterId": "doctor",
+        "presetState": "busy",
+        "relationships": ""
+      }
+    ],
+    "locationId": "lab_main_hall",
+    "timeOfDay": "evening",
+    "toneAndMood": "Tense and mysterious.",
+    "narrativeAction": "MC meets Anna. Anna tries to hide something.",
+    "goal": "Establish Anna's distrust.",
+    "constraints": "Don't mention the outside world yet.",
+    "triggers": [
+      {
+        "type": "flag",
+        "key": "lab_visited",
+        "value": true
+      }
+    ],
+    "dialogueVariants": [
+      {
+        "id": "var1",
+        "text": "I refuse to go with you",
+        "effects": [
+          {
+            "target": "flag",
+            "key": "escape_attempt",
+            "value": true
+          },
+          {
+            "target": "relation",
+            "character": "anna",
+            "affinity": -20,
+            "value": -20
+          }
+        ],
+        "nextNode": "node_scene_002"
+      }
+    ],
+    "defaultNextNode": "node_branch_001",
+    "visualImportant": true
+  }
+}

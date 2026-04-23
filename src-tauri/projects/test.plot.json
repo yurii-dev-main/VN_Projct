@@ -1,0 +1,203 @@
+{
+  "acts": [
+    "node_act_5gas3i"
+  ],
+  "routes": [],
+  "nodes": {
+    "node_act_5gas3i": {
+      "id": "node_act_5gas3i",
+      "type": "Act",
+      "name": "Act Node",
+      "position": {
+        "x": 407,
+        "y": 312
+      },
+      "layerTags": [],
+      "connectedFrom": [],
+      "connectedTo": [
+        "node_scene_6v9ovz"
+      ],
+      "parameters": {
+        "order": 1,
+        "title": "Act 1",
+        "description": "",
+        "requiredFlags": [],
+        "overrides": [
+          {
+            "id": "override_mobwv6ja_951v8",
+            "targetId": "mc",
+            "property": "Status",
+            "newValue": "Уставший инквизитор, который недавно потерял напарника. Мрачный, говорит короткими фразами."
+          }
+        ],
+        "isStart": true
+      }
+    },
+    "node_scene_6v9ovz": {
+      "id": "node_scene_6v9ovz",
+      "type": "Scene",
+      "name": "Scene Node",
+      "position": {
+        "x": 797.818944470518,
+        "y": 322.86402226513485
+      },
+      "layerTags": [],
+      "connectedFrom": [
+        "node_act_5gas3i"
+      ],
+      "connectedTo": [
+        "node_branchpoint_z6vpfk"
+      ],
+      "parameters": {
+        "actingCharacters": [
+          {
+            "characterId": "mc",
+            "presetState": "",
+            "relationships": ""
+          },
+          {
+            "characterId": "silas",
+            "presetState": "",
+            "relationships": ""
+          }
+        ],
+        "locationId": "tavern",
+        "timeOfDay": "evening",
+        "toneAndMood": "Напряженный, нуарный, в воздухе пахнет дождем и перегаром",
+        "narrativeAction": "МС заходит в пустую таверну и подсаживается к осведомителю Сайласу. Сайлас нервничает и постоянно прячет правую руку в кармане плаща.",
+        "goal": "Показать, что Сайлас скрывает какую-то вещь в кармане, но не называть её.",
+        "constraints": "Не упоминать магию. Не решать конфликт в этой сцене.",
+        "triggers": [],
+        "dialogueVariants": [],
+        "defaultNextNode": "node_branchpoint_z6vpfk",
+        "visualImportant": false
+      }
+    },
+    "node_branchpoint_z6vpfk": {
+      "id": "node_branchpoint_z6vpfk",
+      "type": "BranchPoint",
+      "name": "BranchPoint Node",
+      "position": {
+        "x": 1080.8454968170217,
+        "y": 321.8998403442721
+      },
+      "layerTags": [],
+      "connectedFrom": [
+        "node_scene_6v9ovz"
+      ],
+      "connectedTo": [],
+      "parameters": {
+        "conditionType": "playerChoice",
+        "branches": [],
+        "choices": [
+          {
+            "id": "choice_yy2y",
+            "text": "Схватить Сайласа за горло и прижать к стене.",
+            "nextNode": "node_scene_78woti"
+          },
+          {
+            "id": "choice_l2vd",
+            "text": "Молча положить на стол тяжелый мешочек с золотом.",
+            "nextNode": "node_scene_alx079"
+          }
+        ]
+      }
+    },
+    "node_scene_78woti": {
+      "id": "node_scene_78woti",
+      "type": "Scene",
+      "name": "2A",
+      "position": {
+        "x": 1424.0000000000002,
+        "y": 185.9685668669792
+      },
+      "layerTags": [],
+      "connectedFrom": [],
+      "connectedTo": [],
+      "parameters": {
+        "actingCharacters": [
+          {
+            "characterId": "mc",
+            "presetState": "",
+            "relationships": ""
+          },
+          {
+            "characterId": "silas",
+            "presetState": "",
+            "relationships": ""
+          }
+        ],
+        "locationId": "tavern",
+        "timeOfDay": "evening",
+        "toneAndMood": "Агрессивный, быстрый темп.",
+        "narrativeAction": "Реакция Сайласа на действия МС. Он должен запаниковать.",
+        "goal": "Сайлас от страха роняет то, что прятал в кармане — это окровавленный амулет.",
+        "constraints": "МС не должен извиняться.",
+        "triggers": [],
+        "dialogueVariants": [],
+        "defaultNextNode": "",
+        "visualImportant": false
+      }
+    },
+    "node_scene_alx079": {
+      "id": "node_scene_alx079",
+      "type": "Scene",
+      "name": "2B",
+      "position": {
+        "x": 1513.9499201721367,
+        "y": 503.5215768231758
+      },
+      "layerTags": [],
+      "connectedFrom": [],
+      "connectedTo": [],
+      "parameters": {
+        "actingCharacters": [
+          {
+            "characterId": "mc",
+            "presetState": "",
+            "relationships": ""
+          },
+          {
+            "characterId": "silas",
+            "presetState": "",
+            "relationships": ""
+          }
+        ],
+        "locationId": "tavern",
+        "timeOfDay": "evening",
+        "toneAndMood": "Спокойный, алчный.",
+        "narrativeAction": "Реакция Сайласа на действия МС. Жадность пересиливает страх.",
+        "goal": "Сайлас забирает награду и добровольно достает из кармана окровавленный амулет, предупреждая МС об опасности.",
+        "constraints": "Без драки и криков.",
+        "triggers": [],
+        "dialogueVariants": [],
+        "defaultNextNode": "",
+        "visualImportant": false
+      }
+    }
+  },
+  "layerPresets": [],
+  "characters": [
+    {
+      "id": "mc",
+      "icon": ""
+    },
+    {
+      "id": "silas",
+      "icon": ""
+    }
+  ],
+  "locations": [
+    {
+      "id": "tavern",
+      "title": "Tavern",
+      "preview": ""
+    }
+  ],
+  "lore": {
+    "mc": "Главный герой, мужчина, 34 года",
+    "silas": "Мужчина, 31 год, осведомитель.",
+    "tavern": "Таверна, тут пьют люди и обедают."
+  },
+  "startNodeId": "node_act_5gas3i"
+}

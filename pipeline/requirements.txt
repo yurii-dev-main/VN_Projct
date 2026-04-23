@@ -1,0 +1,5 @@
+google-genai
+aiofiles
+pyyaml
+python-dotenv
+tenacity
