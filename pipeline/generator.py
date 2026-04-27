@@ -16,6 +16,9 @@ client = genai.Client()
 
 PROMPT_TEMPLATE = """Ты — профессиональный сценарист визуальных новелл. Твоя задача: написать текст и диалоги для одной конкретной сцены строго по заданным правилам, не забегая вперед сюжета. Формат вывода: имя персонажа и его реплика/действие.
 
+[ГЛОБАЛЬНЫЕ ПРАВИЛА СТИЛЯ И ФОРМАТИРОВАНИЯ]
+{global_style_prompt}
+
 [БАЗА ЗНАНИЙ СЦЕНЫ]
 {lore_text}
 
@@ -105,6 +108,28 @@ def load_lore(export_dir: str) -> Dict[str, str]:
                     print(f"Failed to read lore {f}: {e}")
     return lore
 
+def load_project_settings(export_dir: str) -> str:
+    settings_paths = [
+        os.path.join(export_dir, 'project_settings.json'),
+        os.path.join(export_dir, 'plot.json'),
+    ]
+
+    for settings_path in settings_paths:
+        if not os.path.exists(settings_path):
+            continue
+
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    value = data.get('globalStylePrompt', '')
+                    if value:
+                        return str(value)
+        except Exception as e:
+            print(f"Failed to read project settings {settings_path}: {e}")
+
+    return ""
+
 def find_start_node(nodes: Dict[str, Dict[str, Any]]) -> Optional[str]:
     """Find the starting node by scanning for isStart == True."""
     for node_id, node in nodes.items():
@@ -150,7 +175,8 @@ def build_prompt(
     node: Dict[str, Any],
     lore_db: Dict[str, str],
     bridge_summary: str,
-    context: ActiveContext
+    context: ActiveContext,
+    global_style_prompt: str,
 ) -> str:
     """Build a Gemini prompt for Scene generation, applying active context."""
     params = node.get("parameters", {})
@@ -174,6 +200,7 @@ def build_prompt(
     
     # 3. Apply template
     return PROMPT_TEMPLATE.format(
+        global_style_prompt=global_style_prompt if global_style_prompt else "Не заданы.",
         lore_text=lore_text if lore_text else "Нет дополнительных данных лора.",
         actors_text=actors_text if actors_text else "Нет участников.",
         location_name=params.get("locationId", "Неизвестно"),
@@ -191,12 +218,13 @@ async def process_scene_node(
     lore_db: Dict[str, str],
     bridge_summary: str,
     context: ActiveContext,
-    export_dir: str
+    export_dir: str,
+    global_style_prompt: str
 ) -> str:
     """Generate text for a Scene node."""
     print(f"  [SCENE] Processing: {node.get('name', node_id)}")
     
-    prompt = build_prompt(node, lore_db, bridge_summary, context)
+    prompt = build_prompt(node, lore_db, bridge_summary, context, global_style_prompt)
     scene_text = await generate_text(prompt)
     
     # Save output
@@ -230,6 +258,7 @@ async def dfs_execute(
     bridge_summary: str,
     context: ActiveContext,
     export_dir: str,
+    global_style_prompt: str,
     depth: int = 0,
     branch_name: str = "main"
 ) -> Tuple[str, int]:
@@ -262,21 +291,21 @@ async def dfs_execute(
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]  # Act nodes typically have one outgoing
-            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, depth + 1, branch_name)
+            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
         else:
             print(f"{indent}[ACT] No outgoing connections, ending this path")
             return bridge_summary, 0
     
     elif node_type == "Scene":
         # Process Scene: generate text
-        bridge_summary = await process_scene_node(node_id, node, lore_db, bridge_summary, context, export_dir)
+        bridge_summary = await process_scene_node(node_id, node, lore_db, bridge_summary, context, export_dir, global_style_prompt)
         scenes_generated = 1
         
         # Continue to next node
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]
-            next_bridge, next_scenes = await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, depth + 1, branch_name)
+            next_bridge, next_scenes = await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
             return next_bridge, scenes_generated + next_scenes
         else:
             print(f"{indent}[SCENE] No outgoing connections, ending this path")
@@ -342,7 +371,7 @@ async def dfs_execute(
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]
-            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, depth + 1, branch_name)
+            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
         else:
             return bridge_summary, 0
     
@@ -352,7 +381,7 @@ async def dfs_execute(
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]
-            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, depth + 1, branch_name)
+            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
         else:
             return bridge_summary, 0
     
@@ -369,6 +398,7 @@ async def run_dfs(export_dir: str):
     print("\n[LOADING] Scanning project...")
     nodes = load_project_nodes(export_dir)
     lore_db = load_lore(export_dir)
+    global_style_prompt = load_project_settings(export_dir)
     
     print(f"  Loaded {len(nodes)} nodes")
     print(f"  Loaded {len(lore_db)} lore entries")
@@ -402,6 +432,7 @@ async def run_dfs(export_dir: str):
         initial_bridge,
         context,
         export_dir,
+        global_style_prompt,
         depth=0,
         branch_name="main"
     )

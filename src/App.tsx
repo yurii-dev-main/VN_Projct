@@ -35,6 +35,25 @@ const nodeTypes = {
 
 const dedupe = (values: string[]): string[] => [...new Set(values.filter(Boolean))];
 const cloneProject = (project: PlotProject): PlotProject => JSON.parse(JSON.stringify(project)) as PlotProject;
+const defaultProjectSnapshot = cloneProject(defaultProject);
+const normalizeProject = (project: Partial<PlotProject>): PlotProject => ({
+  ...defaultProjectSnapshot,
+  ...project,
+  meta: {
+    ...defaultProjectSnapshot.meta,
+    ...(project.meta || {}),
+  },
+  globalStylePrompt: project.globalStylePrompt ?? "",
+  nodes: project.nodes ?? defaultProjectSnapshot.nodes,
+  acts: project.acts ?? defaultProjectSnapshot.acts,
+  routes: project.routes ?? defaultProjectSnapshot.routes,
+  startNodeId: project.startNodeId ?? defaultProjectSnapshot.startNodeId,
+  characters: project.characters ?? defaultProjectSnapshot.characters,
+  locations: project.locations ?? defaultProjectSnapshot.locations,
+  globalFlags: project.globalFlags ?? defaultProjectSnapshot.globalFlags,
+  layerPresets: project.layerPresets ?? defaultProjectSnapshot.layerPresets,
+  lore: project.lore ?? defaultProjectSnapshot.lore,
+});
 const getPrimaryLayer = (node: PlotNode): string => node.layerTags[0] ?? "ungrouped";
 const equalStringArrays = (left: string[], right: string[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
@@ -185,9 +204,11 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const [activeGenNodeId, setActiveGenNodeId] = useState<string | null>(null);
   const [draggedNodeType, setDraggedNodeType] = useState<string | null>(null);
+  const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
 
   const historyRef = useRef<PlotProject[]>([cloneProject(defaultProject)]);
   const historyIndexRef = useRef(0);
+  const globalStylePromptRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -220,7 +241,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
     invoke<string>("load_project_json", { path: projectPath })
       .then((raw) => {
-        const loaded = JSON.parse(raw) as PlotProject;
+        const loaded = normalizeProject(JSON.parse(raw) as Partial<PlotProject>);
         historyRef.current = [cloneProject(loaded)];
         historyIndexRef.current = 0;
         setProject(cloneProject(loaded));
@@ -746,6 +767,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       const payload: Record<string, string> = {};
       const exportDir = `../exports/modular-${Date.now()}`;
 
+      payload[`${exportDir}/project_settings.json`] = JSON.stringify(
+        {
+          globalStylePrompt: project.globalStylePrompt,
+        },
+        null,
+        2,
+      );
+
       project.characters.forEach((char) => {
         payload[`${exportDir}/Lore/characters/${char.id}.md`] = project.lore?.[char.id] || "";
       });
@@ -1135,6 +1164,16 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     updateNode(nextEventNode.id, () => nextEventNode);
   };
 
+  useEffect(() => {
+    if (!isProjectSettingsOpen || !globalStylePromptRef.current) {
+      return;
+    }
+
+    const textarea = globalStylePromptRef.current;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [isProjectSettingsOpen, project.globalStylePrompt]);
+
   return (
     <div
       style={{ width: "100vw", height: "100vh", overflow: "hidden", display: "flex", flexDirection: "column" }}
@@ -1149,6 +1188,13 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
             title="Save and return to project list"
           >
             ← Projects
+          </button>
+          <button
+            type="button"
+            className="rounded-md bg-slate-700 px-3 py-1 text-sm"
+            onClick={(e) => { e.preventDefault(); setIsProjectSettingsOpen(true); }}
+          >
+            Project Settings
           </button>
           <div>
             <h1 className="text-lg font-bold tracking-wide">{projectName}</h1>
@@ -2120,6 +2166,46 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
         </section>
       </main>
       )}
+
+      {isProjectSettingsOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+          <div className="flex w-full max-w-4xl flex-col rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-700 px-4 py-3">
+              <div>
+                <h2 className="text-lg font-bold text-slate-100">Project Settings</h2>
+                <p className="text-xs text-slate-400">Global directives used by the AI generator across all scene nodes.</p>
+              </div>
+              <button
+                type="button"
+                className="rounded-md bg-slate-800 px-3 py-1 text-sm text-slate-300 hover:bg-slate-700"
+                onClick={() => setIsProjectSettingsOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Global Style Directives</div>
+              <textarea
+                ref={globalStylePromptRef}
+                className="min-h-[320px] w-full resize-none rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-emerald-500"
+                value={project.globalStylePrompt}
+                placeholder={`e.g., Write in 1st person perspective. Format dialogue strictly as 'Name: "Speech"'. Always describe the lighting and weather.`}
+                onInput={(event) => {
+                  event.currentTarget.style.height = "auto";
+                  event.currentTarget.style.height = `${event.currentTarget.scrollHeight}px`;
+                }}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  commitProject((previous) => ({
+                    ...previous,
+                    globalStylePrompt: nextValue,
+                  }));
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Drag Ghost — fully isolated, no App re-renders on mousemove */}
       <DragGhost activeNodeType={draggedNodeType} />

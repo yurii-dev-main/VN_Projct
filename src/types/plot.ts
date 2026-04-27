@@ -118,6 +118,7 @@ export type PlotProject = {
     title: string;
     version: string;
   };
+  globalStylePrompt: string;
   nodes: Record<string, PlotNode>;
   acts: string[];
   routes: string[];

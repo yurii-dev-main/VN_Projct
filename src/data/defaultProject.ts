@@ -98,6 +98,7 @@ export const defaultProject: PlotProject = {
     title: "My Visual Novel",
     version: "0.1",
   },
+  globalStylePrompt: "",
   nodes: {
     node_act_001: {
       id: "node_act_001",
