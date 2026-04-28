@@ -3385,6 +3385,20 @@ function App() {
   const [screen, setScreen] = useState<AppScreen>({ kind: "selecting" });
 
   const openProject = useCallback((projectPath: string, projectName: string) => {
+    // Save to recent projects
+    try {
+      const recentProjectsKey = "plot-architect:recentProjects";
+      const stored = localStorage.getItem(recentProjectsKey);
+      const recent = stored ? JSON.parse(stored) : [];
+      const filtered = recent.filter((p: any) => p.path !== projectPath);
+      const updated = [
+        { path: projectPath, name: projectName, timestamp: Date.now() },
+        ...filtered,
+      ].slice(0, 10);
+      localStorage.setItem(recentProjectsKey, JSON.stringify(updated));
+    } catch {
+      // Silently fail
+    }
     setScreen({ kind: "editing", projectPath, projectName });
   }, []);
 

@@ -46,11 +46,60 @@ function formatDate(unixSeconds: number): string {
 }
 
 // ─────────────────────────────────────────────
+//  Recent projects storage
+// ─────────────────────────────────────────────
+
+interface RecentProject {
+  path: string;
+  name: string;
+  timestamp: number;
+}
+
+const RECENT_PROJECTS_KEY = "plot-architect:recentProjects";
+const MAX_RECENT = 10;
+
+function getRecentProjects(): RecentProject[] {
+  try {
+    const stored = localStorage.getItem(RECENT_PROJECTS_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentProject(path: string, name: string): void {
+  try {
+    const recent = getRecentProjects();
+    // Remove if already exists
+    const filtered = recent.filter((p) => p.path !== path);
+    // Add to beginning with current timestamp
+    const updated = [
+      { path, name, timestamp: Date.now() },
+      ...filtered,
+    ].slice(0, MAX_RECENT);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(updated));
+  } catch {
+    // Silently fail
+  }
+}
+
+function removeRecentProject(path: string): void {
+  try {
+    const recent = getRecentProjects();
+    const filtered = recent.filter((p) => p.path !== path);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(filtered));
+  } catch {
+    // Silently fail
+  }
+}
+
+// ─────────────────────────────────────────────
 //  Component
 // ─────────────────────────────────────────────
 
 export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -65,6 +114,7 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
     try {
       const list = await invoke<ProjectEntry[]>("list_projects");
       setProjects(list);
+      setRecentProjects(getRecentProjects());
     } catch (err) {
       setError(String(err));
     } finally {
@@ -74,6 +124,8 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
 
   useEffect(() => {
     reload();
+    // Also load recent projects on mount
+    setRecentProjects(getRecentProjects());
   }, []);
 
   // ── Create project ─────────────────────────
@@ -130,8 +182,11 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
       }
 
       const fileName = selected.split(/[\\/]/).pop() || selected;
-      const projectName = fileName.replace(/\.plot\.json$/i, "").replace(/\.json$/i, "");
-      onOpen(selected, projectName);
+      const projectName = fileName.replace(/\.plot\.json$/i, "").replace(/\.json$/i, "");      
+      // Save to recent projects
+      saveRecentProject(selected, projectName);
+      setRecentProjects(getRecentProjects());
+            onOpen(selected, projectName);
     } catch (err) {
       setError(String(err));
     }
@@ -338,6 +393,82 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
               ×
             </button>
           </div>
+        )}
+
+        {/* Recent Projects Section */}
+        {recentProjects.length > 0 && (
+          <>
+            <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: "#64748b", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                Recent Projects ({recentProjects.length})
+              </h2>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16, marginBottom: 40 }}>
+              {recentProjects.map((recent) => (
+                <div
+                  key={recent.path}
+                  onClick={() => onOpen(recent.path, recent.name)}
+                  style={{
+                    padding: 16,
+                    borderRadius: 12,
+                    border: "1px solid rgba(99,102,241,0.3)",
+                    background: "linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(6,182,212,0.05) 100%)",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    boxShadow: "0 4px 12px rgba(99,102,241,0.1)",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLElement).style.borderColor = "#6366f1";
+                    (e.currentTarget as HTMLElement).style.boxShadow = "0 8px 16px rgba(99,102,241,0.2)";
+                    (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLElement).style.borderColor = "rgba(99,102,241,0.3)";
+                    (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 12px rgba(99,102,241,0.1)";
+                    (e.currentTarget as HTMLElement).style.transform = "translateY(0)";
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>
+                        📄 {recent.name}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {recent.path}
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRecentProject(recent.path);
+                        setRecentProjects(getRecentProjects());
+                      }}
+                      style={{
+                        background: "rgba(239,68,68,0.2)",
+                        border: "none",
+                        color: "#fca5a5",
+                        borderRadius: 6,
+                        padding: "4px 8px",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        marginLeft: 8,
+                        transition: "background 0.2s",
+                      }}
+                      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(239,68,68,0.4)")}
+                      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(239,68,68,0.2)")}
+                      title="Remove from recent"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 10, color: "#475569" }}>
+                    {new Date(recent.timestamp).toLocaleDateString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
         )}
 
         {/* Section label */}
