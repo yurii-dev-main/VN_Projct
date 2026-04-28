@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 use std::io::{BufRead, BufReader};
+use std::process::Stdio;
+use std::thread;
 use tauri::Emitter;
 
 // ─────────────────────────────────────────────
@@ -233,6 +235,108 @@ fn run_ai_pipeline(app: tauri::AppHandle, export_dir: String) -> Result<String, 
     Ok("Started".to_string())
 }
 
+#[tauri::command]
+fn run_agent_planner(app: tauri::AppHandle, prompt: String, context_json: String) -> Result<String, String> {
+    thread::spawn(move || {
+        let mut child = match std::process::Command::new("python")
+            .current_dir("../pipeline")
+            .arg("agent.py")
+            .arg("--prompt")
+            .arg(prompt)
+            .arg("--context-json")
+            .arg(context_json)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                app.emit(
+                    "agent-event",
+                    serde_json::json!({
+                        "type": "agent:status",
+                        "status": "error",
+                        "message": format!("Failed to start python: {}", e),
+                    }),
+                )
+                .ok();
+                return;
+            }
+        };
+
+        let stdout_handle = child.stdout.take().map(|stdout| {
+            let app = app.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            app.emit("agent-event", parsed).ok();
+                        }
+                    }
+                }
+            })
+        });
+
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            let app = app.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        app.emit(
+                            "agent-event",
+                            serde_json::json!({
+                                "type": "agent:status",
+                                "status": "error",
+                                "message": line,
+                            }),
+                        )
+                        .ok();
+                    }
+                }
+            })
+        });
+
+        if let Some(handle) = stdout_handle {
+            let _ = handle.join();
+        }
+
+        if let Some(handle) = stderr_handle {
+            let _ = handle.join();
+        }
+
+        match child.wait() {
+            Ok(status) => {
+                if !status.success() {
+                    app.emit(
+                        "agent-event",
+                        serde_json::json!({
+                            "type": "agent:status",
+                            "status": "error",
+                            "message": format!("Agent planner exited with {}", status),
+                        }),
+                    )
+                    .ok();
+                }
+            }
+            Err(e) => {
+                app.emit(
+                    "agent-event",
+                    serde_json::json!({
+                        "type": "agent:status",
+                        "status": "error",
+                        "message": format!("Failed to wait for planner: {}", e),
+                    }),
+                )
+                .ok();
+            }
+        }
+    });
+
+    Ok("Started".to_string())
+}
+
 // ─────────────────────────────────────────────
 //  Internal helpers
 // ─────────────────────────────────────────────
@@ -266,7 +370,8 @@ pub fn run() {
             list_projects,
             export_project_json,
             export_modular_project,
-            run_ai_pipeline
+            run_ai_pipeline,
+            run_agent_planner
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

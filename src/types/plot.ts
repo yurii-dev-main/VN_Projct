@@ -119,6 +119,7 @@ export type PlotProject = {
     version: string;
   };
   globalStylePrompt: string;
+  aiChatHistory?: AIChatMessage[];
   nodes: Record<string, PlotNode>;
   acts: string[];
   routes: string[];
@@ -128,4 +129,10 @@ export type PlotProject = {
   globalFlags: string[];
   layerPresets: string[];
   lore?: Record<string, string>;
+};
+
+export type AIChatMessage = {
+  id: string;
+  role: "assistant" | "user" | "system";
+  content: string;
 };

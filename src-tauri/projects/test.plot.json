@@ -1,8 +1,9 @@
 {
-  "acts": [
-    "node_act_5gas3i"
-  ],
-  "routes": [],
+  "meta": {
+    "title": "My Visual Novel",
+    "version": "0.1"
+  },
+  "globalStylePrompt": "",
   "nodes": {
     "node_act_5gas3i": {
       "id": "node_act_5gas3i",
@@ -108,12 +109,14 @@
       "type": "Scene",
       "name": "2A",
       "position": {
-        "x": 1424.0000000000002,
-        "y": 185.9685668669792
+        "x": 1535.9980896122108,
+        "y": 184.19081941281706
       },
       "layerTags": [],
       "connectedFrom": [],
-      "connectedTo": [],
+      "connectedTo": [
+        "node_scene_3a_655a18"
+      ],
       "parameters": {
         "actingCharacters": [
           {
@@ -135,7 +138,7 @@
         "constraints": "МС не должен извиняться.",
         "triggers": [],
         "dialogueVariants": [],
-        "defaultNextNode": "",
+        "defaultNextNode": "node_scene_3a_655a18",
         "visualImportant": false
       }
     },
@@ -144,12 +147,14 @@
       "type": "Scene",
       "name": "2B",
       "position": {
-        "x": 1513.9499201721367,
-        "y": 503.5215768231758
+        "x": 1599.2817979719164,
+        "y": 492.8550920982034
       },
       "layerTags": [],
       "connectedFrom": [],
-      "connectedTo": [],
+      "connectedTo": [
+        "node_scene_3b_36316a"
+      ],
       "parameters": {
         "actingCharacters": [
           {
@@ -171,12 +176,116 @@
         "constraints": "Без драки и криков.",
         "triggers": [],
         "dialogueVariants": [],
+        "defaultNextNode": "node_scene_3b_36316a",
+        "visualImportant": false
+      }
+    },
+    "node_scene_3a_655a18": {
+      "id": "node_scene_3a_655a18",
+      "type": "Scene",
+      "name": "3A",
+      "position": {
+        "x": 1890.9233862699323,
+        "y": 183.22635402923174
+      },
+      "layerTags": [],
+      "connectedFrom": [
+        "node_scene_78woti"
+      ],
+      "connectedTo": [
+        "node_scene_7894be"
+      ],
+      "parameters": {
+        "actingCharacters": [
+          "mc",
+          "silas",
+          {
+            "characterId": "mc",
+            "presetState": "",
+            "relationships": ""
+          }
+        ],
+        "locationId": "ancientRuinChamber",
+        "timeOfDay": "evening",
+        "toneAndMood": "Нарастающая паника, срочность, зловещая тайна, предчувствие беды.",
+        "narrativeAction": "Главный герой подбирает амулет, Сайлас в панике пытается его забрать обратно, предупреждая об опасности.",
+        "goal": "Главный герой подбирает амулет, Сайлас в панике пытается его забрать обратно, предупреждая об опасности.",
+        "constraints": "Фокус на попытках Сайласа предотвратить контакт, динамичные предупреждения, усиление напряжения.",
+        "triggers": [],
+        "dialogueVariants": [],
+        "defaultNextNode": "node_scene_7894be",
+        "visualImportant": false
+      }
+    },
+    "node_scene_3b_36316a": {
+      "id": "node_scene_3b_36316a",
+      "type": "Scene",
+      "name": "3B",
+      "position": {
+        "x": 1893.531756526424,
+        "y": 510.76997671602004
+      },
+      "layerTags": [],
+      "connectedFrom": [
+        "node_scene_alx079"
+      ],
+      "connectedTo": [
+        "node_scene_7894be"
+      ],
+      "parameters": {
+        "actingCharacters": [
+          "mc",
+          "silas"
+        ],
+        "locationId": "ancientRuinChamber",
+        "timeOfDay": "evening",
+        "toneAndMood": "Напряженное колебание, мрачное предчувствие, фатальная решимость, зловещая атмосфера.",
+        "narrativeAction": "Главный герой колеблется, но все равно берет амулет, несмотря на настойчивые предупреждения Сайласа.",
+        "goal": "Главный герой колеблется, но все равно берет амулет, несмотря на настойчивые предупреждения Сайласа.",
+        "constraints": "Описать внутреннюю борьбу Главного героя, настойчивость Сайласа, подчеркнуть неизбежность выбора.",
+        "triggers": [],
+        "dialogueVariants": [],
+        "defaultNextNode": "node_scene_7894be",
+        "visualImportant": false
+      }
+    },
+    "node_scene_7894be": {
+      "id": "node_scene_7894be",
+      "type": "Scene",
+      "name": "Общий Свод: Тайна Амулета",
+      "position": {
+        "x": 2289.632262826161,
+        "y": 346.70297251619564
+      },
+      "layerTags": [],
+      "connectedFrom": [
+        "node_scene_3a_655a18",
+        "node_scene_3b_36316a"
+      ],
+      "connectedTo": [],
+      "parameters": {
+        "actingCharacters": [
+          "mc",
+          "silas"
+        ],
+        "locationId": "ancientRuinChamber",
+        "timeOfDay": "evening",
+        "toneAndMood": "Всепоглощающий ужас, ошеломляющее откровеление, ощущение древнего проклятия, мистическая тревога.",
+        "narrativeAction": "Главный герой, подержав амулет, начинает видеть отрывочные, тревожные видения его древнего происхождения и кровавого прошлого, понимая, что это не просто украшение, а мощный, возможно, проклятый артефакт. Сайлас с ужасом наблюдает за его реакцией.",
+        "goal": "Главный герой, подержав амулет, начинает видеть отрывочные, тревожные видения его древнего происхождения и кровавого прошлого, понимая, что это не просто украшение, а мощный, возможно, проклятый артефакт. Сайлас с ужасом наблюдает за его реакцией.",
+        "constraints": "Детально описать тревожные видения, реакции Главного героя и Сайласа на проявление силы амулета, усилить драматизм.",
+        "triggers": [],
+        "dialogueVariants": [],
         "defaultNextNode": "",
         "visualImportant": false
       }
     }
   },
-  "layerPresets": [],
+  "acts": [
+    "node_act_5gas3i"
+  ],
+  "routes": [],
+  "startNodeId": "node_act_5gas3i",
   "characters": [
     {
       "id": "mc",
@@ -194,10 +303,46 @@
       "preview": ""
     }
   ],
+  "globalFlags": [
+    "lab_visited",
+    "escape_attempt"
+  ],
+  "layerPresets": [],
   "lore": {
     "mc": "Главный герой, мужчина, 34 года",
     "silas": "Мужчина, 31 год, осведомитель.",
     "tavern": "Таверна, тут пьют люди и обедают."
   },
-  "startNodeId": "node_act_5gas3i"
+  "aiChatHistory": [
+    {
+      "id": "user-1777327581311",
+      "role": "user",
+      "content": "Привет, твоя задача продолжить логику повествования этих двух нодов\n1) создай к каждому еще по одной сцене для того чтобы можно было их после этого свести к общей\n2) Создай третью сцену, в какую сольются  эти 2 линии, раскрой в ней завязку истории об этом амулете"
+    },
+    {
+      "id": "assistant-1777327581311",
+      "role": "assistant",
+      "content": "Prompt package prepared for AI backend. Selected nodes: 2. Global directives are attached and ready to be sent."
+    },
+    {
+      "id": "user-1777327724690",
+      "role": "user",
+      "content": "заполни в этих нодах \"Constraints (AI rules)\" и \"Tone & Mood\" так чтобы они соответствовали сцене"
+    },
+    {
+      "id": "assistant-1777327724690",
+      "role": "assistant",
+      "content": "Prompt package prepared for AI backend. Selected nodes: 3. Global directives are attached and ready to be sent."
+    },
+    {
+      "id": "user-1777332723871",
+      "role": "user",
+      "content": "заполни в этих нодах \"Constraints (AI rules)\" и \"Tone & Mood\" так чтобы они соответствовали сцене\n\nтакже заполни Слоты персонажей и выбери локации для каждой сцены (если нет подходящей создай ее в лоре и опиши)"
+    },
+    {
+      "id": "assistant-1777332723871",
+      "role": "assistant",
+      "content": "Prompt package prepared for AI backend. Selected nodes: 3. Global directives are attached and ready to be sent."
+    }
+  ]
 }

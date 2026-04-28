@@ -20,13 +20,19 @@ import { PlotNode as PlotNodeView } from "./components/PlotNode";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { RouteInspector } from "./components/RouteInspector";
 import { createDefaultNode, defaultProject } from "./data/defaultProject";
-import { ActNode, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode } from "./types/plot";
+import { AIChatMessage, ActNode, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode } from "./types/plot";
 import { sanitizeNodeForAI } from "./utils/aiExport";
 
 type ContextMenuState =
   | { kind: "node"; nodeId: string; x: number; y: number }
   | { kind: "edge"; edgeId: string; x: number; y: number }
   | null;
+
+type AgentTask = {
+  id: number;
+  desc: string;
+  status: string;
+};
 
 const nodeTypes = {
   actNode: ActNodeView,
@@ -44,6 +50,7 @@ const normalizeProject = (project: Partial<PlotProject>): PlotProject => ({
     ...(project.meta || {}),
   },
   globalStylePrompt: project.globalStylePrompt ?? "",
+  aiChatHistory: project.aiChatHistory ?? [],
   nodes: project.nodes ?? defaultProjectSnapshot.nodes,
   acts: project.acts ?? defaultProjectSnapshot.acts,
   routes: project.routes ?? defaultProjectSnapshot.routes,
@@ -205,10 +212,21 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [activeGenNodeId, setActiveGenNodeId] = useState<string | null>(null);
   const [draggedNodeType, setDraggedNodeType] = useState<string | null>(null);
   const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
+  const [leftPanelTab, setLeftPanelTab] = useState<"hierarchy" | "chat">("chat");
+  const [aiChatDraft, setAiChatDraft] = useState("");
+  const [aiChatMessages, setAiChatMessages] = useState<AIChatMessage[]>([]);
+  const [agentStatus, setAgentStatus] = useState<"idle" | "planning" | "executing" | "completed" | "error">("idle");
+  const [agentStatusMessage, setAgentStatusMessage] = useState<string>("");
+  const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
+  const [stagedMutations, setStagedMutations] = useState<any[]>([]);
+  const [isAwaitingApproval, setIsAwaitingApproval] = useState(false);
+  const stagedMutationsRef = useRef<any[]>([]);
 
   const historyRef = useRef<PlotProject[]>([cloneProject(defaultProject)]);
   const historyIndexRef = useRef(0);
   const globalStylePromptRef = useRef<HTMLTextAreaElement | null>(null);
+  const aiChatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const aiChatScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -232,6 +250,87 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     };
   }, []);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen<unknown>("agent-event", (event) => {
+      const rawPayload = event.payload;
+      const payload = typeof rawPayload === "string"
+        ? (() => {
+            try {
+              return JSON.parse(rawPayload) as Record<string, unknown>;
+            } catch {
+              return null;
+            }
+          })()
+        : (rawPayload as Record<string, unknown> | null);
+
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+
+      if (payload.type === "agent:status") {
+        const nextStatus = payload.status;
+        const nextMessage = typeof payload.message === "string" ? payload.message : "";
+
+        if (nextStatus === "planning" || nextStatus === "executing" || nextStatus === "completed" || nextStatus === "error" || nextStatus === "idle") {
+          setAgentStatus(nextStatus);
+        }
+        setAgentStatusMessage(nextMessage);
+        // If execution finished and we have staged mutations, show approval UI
+        if (nextStatus === "completed" && stagedMutationsRef.current.length > 0) {
+          setIsAwaitingApproval(true);
+        }
+      }
+
+      if (payload.type === "agent:todo") {
+        const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+        setAgentTasks(
+          tasks
+            .filter((task): task is AgentTask => Boolean(task) && typeof task === "object")
+            .map((task, index) => ({
+              id: Number((task as Record<string, unknown>).id ?? index + 1),
+              desc: String((task as Record<string, unknown>).desc ?? ""),
+              status: String((task as Record<string, unknown>).status ?? "pending"),
+            })),
+        );
+        setAgentStatus("completed");
+        setAgentStatusMessage("Planning complete.");
+      }
+
+      if (payload.type === "agent:mutation") {
+        // Stage mutations for human approval instead of applying directly
+        setStagedMutations((prev) => {
+          const next = [...prev, payload];
+          stagedMutationsRef.current = next;
+          return next;
+        });
+      }
+
+      if (payload.type === "agent:task_update") {
+        const taskId = Number(payload.task_id);
+        const nextStatus = String(payload.status ?? "pending");
+
+        setAgentTasks((previous) =>
+          previous.map((task) =>
+            task.id === taskId
+              ? {
+                  ...task,
+                  status: nextStatus,
+                }
+              : task,
+          ),
+        );
+      }
+    }).then((f) => {
+      unlisten = f;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Load the project from its file whenever projectPath changes
   useEffect(() => {
     setStatus("Loading…");
@@ -245,9 +344,11 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
         historyRef.current = [cloneProject(loaded)];
         historyIndexRef.current = 0;
         setProject(cloneProject(loaded));
+        setAiChatMessages(loaded.aiChatHistory ?? []);
         setStatus("Ready");
       })
       .catch(() => {
+        setAiChatMessages([]);
         setStatus("New project — not saved yet");
       });
   // projectPath is the only real dependency here
@@ -268,6 +369,226 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
   const applySnapshot = (snapshot: PlotProject) => {
     setProject(cloneProject(snapshot));
+  };
+
+  const buildAgentNodeFromMutation = (payloadNode: Record<string, unknown>): PlotNode | null => {
+    const nodeType = String(payloadNode.type ?? "");
+    if (nodeType !== "Act" && nodeType !== "Scene" && nodeType !== "BranchPoint") {
+      return null;
+    }
+
+    const id = String(payloadNode.id ?? "").trim() || createSlug(`${nodeType}_${Date.now()}`);
+    const positionValue = payloadNode.position as { x?: number; y?: number } | undefined;
+    const x = Number(positionValue?.x ?? 100);
+    const y = Number(positionValue?.y ?? 100);
+    const data = (payloadNode.data as Record<string, unknown> | undefined) ?? {};
+    const title = String(data.title ?? nodeType).trim() || nodeType;
+    const description = String(data.description ?? "");
+
+    const created = createDefaultNode(nodeType as PlotNodeType, x, y);
+
+    if (created.type === "Act") {
+      const act = created as ActNode;
+      return {
+        ...act,
+        id,
+        name: title,
+        parameters: {
+          ...act.parameters,
+          title,
+          description,
+        },
+      };
+    }
+
+    if (created.type === "Scene") {
+      const scene = created as SceneNode;
+      return {
+        ...scene,
+        id,
+        name: title,
+        parameters: {
+          ...scene.parameters,
+          narrativeAction: description || scene.parameters.narrativeAction,
+          goal: scene.parameters.goal || description,
+        },
+      };
+    }
+
+    const branchPoint = created as BranchPointNode;
+    return {
+      ...branchPoint,
+      id,
+      name: title,
+    };
+  };
+
+  const applyAgentNodeMutation = (payloadNode: Record<string, unknown>) => {
+    const createdNode = buildAgentNodeFromMutation(payloadNode);
+
+    if (!createdNode) {
+      return;
+    }
+
+    commitProject((previous) => ({
+      ...previous,
+      nodes: {
+        ...previous.nodes,
+        [createdNode.id]: createdNode,
+      },
+      acts: createdNode.type === "Act" ? dedupe([...previous.acts, createdNode.id]) : previous.acts,
+      routes: createdNode.type === "Route" ? dedupe([...previous.routes, createdNode.id]) : previous.routes,
+    }));
+
+    setSelectedNodeId(createdNode.id);
+    setStatus(`Agent added ${createdNode.type} node ${createdNode.id}`);
+  };
+
+  const applyAgentEdgeMutation = (payloadEdge: Record<string, unknown>) => {
+    const sourceId = String(payloadEdge.source ?? "").trim();
+    const targetId = String(payloadEdge.target ?? "").trim();
+
+    if (!sourceId || !targetId) {
+      return;
+    }
+
+    commitProject((previous) => {
+      const sourceNode = previous.nodes[sourceId];
+      const targetNode = previous.nodes[targetId];
+
+      if (!sourceNode || !targetNode) {
+        return previous;
+      }
+
+      const nextSource = cloneProject({ ...previous, nodes: { [sourceNode.id]: sourceNode } }).nodes[sourceNode.id];
+      const nextTarget = cloneProject({ ...previous, nodes: { [targetNode.id]: targetNode } }).nodes[targetNode.id];
+
+      nextSource.connectedTo = dedupe([...nextSource.connectedTo, targetNode.id]);
+      nextTarget.connectedFrom = dedupe([...nextTarget.connectedFrom, sourceNode.id]);
+
+      if (nextSource.type === "Scene") {
+        const scene = nextSource as SceneNode;
+        scene.parameters = {
+          ...scene.parameters,
+          defaultNextNode: targetNode.id,
+        };
+      }
+
+      if (nextSource.type === "BranchPoint") {
+        const branch = nextSource as BranchPointNode;
+        const existingChoiceIndex = branch.parameters.choices.findIndex((choice) => !choice.nextNode);
+        const nextChoices = branch.parameters.choices.slice();
+
+        if (existingChoiceIndex >= 0) {
+          nextChoices[existingChoiceIndex] = {
+            ...nextChoices[existingChoiceIndex],
+            nextNode: targetNode.id,
+          };
+        } else {
+          nextChoices.push({
+            id: createSlug(`choice_${sourceId}_${targetId}_${Date.now()}`),
+            text: "Choice",
+            nextNode: targetNode.id,
+          });
+        }
+
+        branch.parameters = {
+          ...branch.parameters,
+          choices: nextChoices,
+        };
+      }
+
+      return {
+        ...previous,
+        nodes: {
+          ...previous.nodes,
+          [nextSource.id]: nextSource,
+          [nextTarget.id]: nextTarget,
+        },
+      };
+    });
+
+    setStatus(`Agent connected ${sourceId} -> ${targetId}`);
+  };
+
+  const applyAgentUpdateMutation = (nodeId: string, data: Record<string, unknown>) => {
+    // Merge provided fields into the existing node's parameters
+    commitProject((previous) => {
+      const existing = previous.nodes[nodeId];
+      if (!existing) return previous;
+
+      const next = { ...existing } as PlotNode;
+
+      // For Scene nodes, map common keys into parameters
+      const nextParameters = { ...(next.parameters || {}) } as Record<string, unknown>;
+
+      Object.keys(data).forEach((key) => {
+        const value = (data as Record<string, unknown>)[key];
+        if (value === null || value === undefined) return;
+
+        // Accept both snake_case and camelCase keys from the agent
+        if (key === "narrativeAction" || key === "narrative_action") {
+          nextParameters["narrativeAction"] = String(value);
+          return;
+        }
+        if (key === "toneAndMood" || key === "tone" || key === "tone_and_mood") {
+          nextParameters["toneAndMood"] = String(value);
+          return;
+        }
+        if (key === "goal") {
+          nextParameters["goal"] = String(value);
+          return;
+        }
+        if (key === "constraints") {
+          nextParameters["constraints"] = String(value);
+          return;
+        }
+        if (key === "dialogue_text" || key === "dialogueText") {
+          // Append a dialogue variant if the node is a Scene
+          if (next.type === "Scene") {
+            const scene = next as SceneNode;
+            const variant: DialogueVariant = {
+              id: `var_${Math.random().toString(36).slice(2, 6)}`,
+              text: String(value),
+              effects: [],
+              nextNode: "",
+            };
+            nextParameters["dialogueVariants"] = [...(scene.parameters.dialogueVariants || []), variant];
+          }
+          return;
+        }
+        if (key === "choices" && Array.isArray(value)) {
+          // Replace or set choices for BranchPoint nodes
+          if (next.type === "BranchPoint") {
+            const choices = (value as unknown[]).map((entry) => {
+              const obj = entry as Record<string, unknown>;
+              return {
+                id: String(obj.id ?? createSlug(String(obj.text ?? "choice"))),
+                text: String(obj.text ?? ""),
+                nextNode: String((obj.nextNode ?? "") as string) || undefined,
+              } as BranchChoice;
+            });
+            nextParameters["choices"] = choices;
+          }
+          return;
+        }
+
+        // For any other keys, just set them directly on parameters
+        nextParameters[key] = value as unknown;
+      });
+
+      next.parameters = nextParameters as typeof next.parameters;
+
+      return {
+        ...previous,
+        nodes: {
+          ...previous.nodes,
+          [next.id]: next,
+        },
+      };
+    });
+
+    setStatus(`Agent updated ${nodeId}`);
   };
 
   const undo = () => {
@@ -387,6 +708,16 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
     return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
   }, [allNodes]);
+
+  const selectedCanvasNodeCount = useMemo(
+    () => allNodes.filter((node) => selectedFlowNodeIds.includes(node.id)).length,
+    [allNodes, selectedFlowNodeIds],
+  );
+
+  const selectedNodesForChat = useMemo(
+    () => allNodes.filter((node) => selectedFlowNodeIds.includes(node.id)).map((node) => sanitizeNodeForAI(node)),
+    [allNodes, selectedFlowNodeIds],
+  );
 
   const flowNodes = useMemo<FlowNode[]>(
     () =>
@@ -1174,10 +1505,77 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [isProjectSettingsOpen, project.globalStylePrompt]);
 
+  useEffect(() => {
+    if (leftPanelTab !== "chat" || !aiChatInputRef.current) {
+      return;
+    }
+
+    const textarea = aiChatInputRef.current;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [aiChatDraft, leftPanelTab]);
+
+  useEffect(() => {
+    if (!aiChatScrollRef.current) {
+      return;
+    }
+
+    aiChatScrollRef.current.scrollTop = aiChatScrollRef.current.scrollHeight;
+  }, [aiChatMessages]);
+
+  useEffect(() => {
+    setProject((previous) => ({
+      ...previous,
+      aiChatHistory: aiChatMessages,
+    }));
+  }, [aiChatMessages]);
+
+  const handleAiChatSend = () => {
+    const prompt = aiChatDraft.trim();
+    if (!prompt) {
+      return;
+    }
+
+    const structuredPromptPackage = {
+      nodes: selectedNodesForChat,
+      globalStyle: project.globalStylePrompt.trim(),
+      lore: project.lore || {},
+      // Send a minimized representation to the agent to save tokens and
+      // make name->id resolution deterministic: only id + name/title fields.
+      characters: (project.characters || []).map((c) => ({ id: c.id, name: (c as any).name || (c as any).displayName || c.id })),
+      locations: (project.locations || []).map((l) => ({ id: l.id, title: (l as any).title || l.id })),
+      userPrompt: prompt,
+    };
+
+    setAiChatMessages((previous) => [
+      ...previous,
+      { id: `user-${Date.now()}`, role: "user", content: prompt },
+      {
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        content: `Prompt package prepared for AI backend. Selected nodes: ${selectedNodesForChat.length}. Global directives are attached and ready to be sent.`,
+      },
+    ]);
+
+    setAgentStatus("planning");
+    setAgentStatusMessage("Initializing agent...");
+    setAgentTasks([]);
+    setStatus(`AI Co-pilot planning: ${selectedNodesForChat.length} selected node(s)`);
+    setAiChatDraft("");
+
+    void invoke("run_agent_planner", {
+      prompt,
+      contextJson: JSON.stringify(structuredPromptPackage),
+    }).catch((error) => {
+      setAgentStatus("error");
+      setAgentStatusMessage(`Failed to start planner: ${String(error)}`);
+    });
+  };
+
   return (
     <div
-      style={{ width: "100vw", height: "100vh", overflow: "hidden", display: "flex", flexDirection: "column" }}
-      className="bg-[radial-gradient(circle_at_20%_20%,#1f2937_0,#0f172a_38%,#020617_100%)] text-slate-100"
+      style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column" }}
+      className="h-screen overflow-hidden bg-[radial-gradient(circle_at_20%_20%,#1f2937_0,#0f172a_38%,#020617_100%)] text-slate-100"
     >
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-700/80 bg-slate-950/80 px-4 backdrop-blur">
         <div className="flex items-center gap-3">
@@ -1253,72 +1651,293 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
       {activeView === "graph" ? (
       <main className="grid grid-cols-[20%_60%_20%]" style={{ flex: 1, minHeight: 0 }}>
-        <aside className="border-r border-slate-700/80 bg-slate-900/65 p-3">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-300">Hierarchy / Layers</h2>
-
-          <div className="mb-3 rounded-md border border-slate-700/70 bg-slate-950/70 p-2">
-            <div className="mb-2 text-xs font-semibold text-slate-400">Layer Filters</div>
-            <div className="mb-2 max-h-32 space-y-1 overflow-auto pr-1">
-              {layerCatalog.map((layer) => (
-                <label key={layer} className="flex items-center gap-2 text-xs text-slate-200">
-                  <input type="checkbox" checked={activeLayerTags.includes(layer)} onChange={() => toggleLayer(layer)} />
-                  <span>{layer}</span>
-                </label>
-              ))}
-            </div>
-
-            <div className="flex gap-2">
-              <input
-                className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
-                placeholder="custom tag"
-                value={newTagInput}
-                onChange={(event) => setNewTagInput(event.target.value)}
-              />
-              <button className="rounded-md bg-slate-700 px-2 py-1 text-xs" onClick={addNewTag}>
-                Create new tag
+        <aside className="flex min-h-0 flex-col border-r border-slate-700/80 bg-slate-900/65 p-3 overflow-hidden">
+          <div className="mb-3 rounded-xl border border-slate-700/70 bg-slate-950/80 p-1">
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-colors ${
+                  leftPanelTab === "hierarchy"
+                    ? "bg-slate-700 text-slate-50 shadow-inner shadow-slate-950/40"
+                    : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-200"
+                }`}
+                onClick={() => setLeftPanelTab("hierarchy")}
+              >
+                Hierarchy
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-colors ${
+                  leftPanelTab === "chat"
+                    ? "bg-fuchsia-600/80 text-white shadow-lg shadow-fuchsia-950/30"
+                    : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-200"
+                }`}
+                onClick={() => setLeftPanelTab("chat")}
+              >
+                AI Co-pilot
               </button>
             </div>
           </div>
 
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Nodes by Layer</div>
-          <div className="mt-2 max-h-[68vh] space-y-2 overflow-auto pr-1">
-            {groupedNodes.map(([layer, nodes]) => {
-              const collapsed = collapsedLayers[layer] ?? false;
-
-              return (
-                <div key={layer} className="rounded-md border border-slate-700 bg-slate-800/60">
-                  <button
-                    className="flex w-full items-center justify-between px-2 py-2 text-left text-xs font-semibold"
-                    onClick={() => setCollapsedLayers((previous) => ({ ...previous, [layer]: !collapsed }))}
-                  >
-                    <span>{layer}</span>
-                    <span>{collapsed ? "+" : "-"}</span>
-                  </button>
-                  {!collapsed ? (
-                    <div className="space-y-1 border-t border-slate-700 p-2">
-                      {nodes.map((node) => (
-                        <button
-                          key={node.id}
-                          className={`w-full rounded-md border px-2 py-2 text-left text-xs ${
-                            selectedNodeId === node.id
-                              ? "border-amber-400 bg-amber-500/20"
-                              : "border-slate-700 bg-slate-800/60 hover:bg-slate-800"
-                          }`}
-                          onPointerDown={(event) => handlePalettePointerDown(event, node.type)}
-                          onClick={() => setSelectedNodeId(node.id)}
-                          onDoubleClick={() => focusNode(node.id)}
-                        >
-                          <div className="font-semibold">{node.name}</div>
-                          <div className="text-slate-400">{node.type}</div>
-                          <div className="truncate text-slate-500">{node.layerTags.join(", ") || "no tags"}</div>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
+          {leftPanelTab === "chat" ? (
+            <div className="flex h-full min-h-0 flex-col rounded-xl border border-slate-700/70 bg-slate-950/60 p-3 overflow-hidden">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">AI Co-pilot</h2>
+                  <p className="mt-1 text-xs text-slate-500">Phase 4 workspace stub for guided generation.</p>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+
+              <div ref={aiChatScrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3">
+                {aiChatMessages.length === 0 ? (
+                  <div className="rounded-2xl border border-fuchsia-500/20 bg-slate-900/70 p-4 text-sm text-slate-300 shadow-lg shadow-slate-950/40">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-fuchsia-300">Ready</div>
+                    <p className="mt-2 leading-relaxed">
+                      🤖 AI Co-pilot ready. Hold SHIFT + Drag on the canvas to select nodes and include them in context.
+                    </p>
+                  </div>
+                ) : (
+                  aiChatMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`rounded-2xl border p-4 text-sm shadow-lg shadow-slate-950/40 ${
+                        message.role === "user"
+                          ? "ml-8 border-slate-700 bg-slate-900/75 text-slate-100"
+                          : message.role === "system"
+                            ? "border-amber-500/20 bg-amber-500/10 text-amber-50"
+                            : "border-fuchsia-500/20 bg-slate-900/70 text-slate-300"
+                      }`}
+                    >
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                        {message.role === "user" ? "You" : message.role === "system" ? "Prompt Package" : "AI Co-pilot"}
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {isAwaitingApproval && (
+                <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-900/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-amber-200">Review Changes</div>
+                      <div className="text-xs text-amber-300">{stagedMutations.length} proposed change(s) from the agent pending your approval.</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-semibold"
+                        onClick={() => {
+                          // Apply staged mutations
+                          const staged = stagedMutationsRef.current.slice();
+                          staged.forEach((p) => {
+                            if (!p || typeof p !== "object") return;
+                            if (p.action === "add_node" && p.node) applyAgentNodeMutation(p.node as Record<string, unknown>);
+                            if (p.action === "add_edge" && p.edge) applyAgentEdgeMutation(p.edge as Record<string, unknown>);
+                            if (p.action === "update_node" && typeof p.node_id === "string" && p.data) applyAgentUpdateMutation(String(p.node_id), p.data as Record<string, unknown>);
+                          });
+                          setStagedMutations([]);
+                          stagedMutationsRef.current = [];
+                          setIsAwaitingApproval(false);
+                          setStatus(`Applied ${staged.length} agent change(s)`);
+                        }}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md bg-rose-600 px-3 py-1 text-sm font-semibold"
+                        onClick={() => {
+                          setStagedMutations([]);
+                          stagedMutationsRef.current = [];
+                          setIsAwaitingApproval(false);
+                          setStatus("Rejected agent changes");
+                        }}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Agent Status</div>
+                <div className={`flex items-center gap-3 rounded-xl border px-3 py-2 text-sm ${
+                  agentStatus === "planning"
+                    ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-100"
+                    : agentStatus === "completed"
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                      : agentStatus === "error"
+                        ? "border-rose-500/30 bg-rose-500/10 text-rose-100"
+                        : "border-slate-700 bg-slate-900/70 text-slate-300"
+                }`}>
+                  <div
+                    className={`h-2.5 w-2.5 rounded-full ${
+                      agentStatus === "planning"
+                        ? "animate-pulse bg-fuchsia-400 shadow-[0_0_18px_rgba(217,70,239,0.8)]"
+                        : agentStatus === "completed"
+                          ? "bg-emerald-400"
+                          : agentStatus === "error"
+                            ? "bg-rose-400"
+                            : "bg-slate-500"
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-semibold capitalize">{agentStatus}</div>
+                    <div className="truncate text-xs text-slate-400">{agentStatusMessage || "Idle"}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">TODO List</div>
+                  <div className="text-[11px] text-slate-500">Planner output</div>
+                </div>
+                <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2">
+                  {agentTasks.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-slate-700/80 bg-slate-900/40 px-3 py-4 text-sm text-slate-500">
+                      No tasks yet. Send a request to generate an agent plan.
+                    </div>
+                  ) : (
+                    agentTasks.map((task) => (
+                      <div
+                        key={task.id}
+                        className="flex items-start gap-3 rounded-xl border border-slate-700/80 bg-slate-900/70 px-3 py-3 shadow-sm shadow-slate-950/30"
+                      >
+                        <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-500 text-[10px] text-slate-400">
+                          {task.status === "pending" ? "○" : "✓"}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Task {task.id}</span>
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                              task.status === "pending"
+                                ? "bg-slate-800 text-slate-400"
+                                : task.status === "done"
+                                  ? "bg-emerald-500/15 text-emerald-300"
+                                  : "bg-fuchsia-500/15 text-fuchsia-300"
+                            }`}>
+                              {task.status}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-sm leading-relaxed text-slate-200 break-words whitespace-pre-wrap">{task.desc}</p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-3 shrink-0 flex items-center justify-between">
+                <div
+                  className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                    selectedCanvasNodeCount > 0
+                      ? "border-fuchsia-400/50 bg-fuchsia-500/15 text-fuchsia-200 shadow-[0_0_24px_rgba(217,70,239,0.18)]"
+                      : "border-slate-700 bg-slate-900 text-slate-400"
+                  }`}
+                >
+                  Context: {selectedCanvasNodeCount} nodes selected
+                </div>
+              </div>
+
+              <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
+                <textarea
+                  ref={aiChatInputRef}
+                  className="max-h-[150px] min-h-[96px] w-full resize-none overflow-y-auto border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
+                  placeholder="Ask the AI Co-pilot to draft, revise, or branch the story..."
+                  value={aiChatDraft}
+                  onInput={(event) => {
+                    event.currentTarget.style.height = "auto";
+                    event.currentTarget.style.maxHeight = "150px";
+                    event.currentTarget.style.height = `${event.currentTarget.scrollHeight}px`;
+                  }}
+                  onChange={(event) => setAiChatDraft(event.target.value)}
+                />
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    className="rounded-md bg-fuchsia-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-fuchsia-500"
+                    onClick={() => {
+                        handleAiChatSend();
+                    }}
+                  >
+                    Send
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-300">Hierarchy / Layers</h2>
+
+              <div className="mb-3 rounded-md border border-slate-700/70 bg-slate-950/70 p-2">
+                <div className="mb-2 text-xs font-semibold text-slate-400">Layer Filters</div>
+                <div className="mb-2 max-h-32 space-y-1 overflow-auto pr-1">
+                  {layerCatalog.map((layer) => (
+                    <label key={layer} className="flex items-center gap-2 text-xs text-slate-200">
+                      <input type="checkbox" checked={activeLayerTags.includes(layer)} onChange={() => toggleLayer(layer)} />
+                      <span>{layer}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
+                    placeholder="custom tag"
+                    value={newTagInput}
+                    onChange={(event) => setNewTagInput(event.target.value)}
+                  />
+                  <button className="rounded-md bg-slate-700 px-2 py-1 text-xs" onClick={addNewTag}>
+                    Create new tag
+                  </button>
+                </div>
+              </div>
+
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">Nodes by Layer</div>
+              <div className="mt-2 max-h-[68vh] space-y-2 overflow-auto pr-1">
+                {groupedNodes.map(([layer, nodes]) => {
+                  const collapsed = collapsedLayers[layer] ?? false;
+
+                  return (
+                    <div key={layer} className="rounded-md border border-slate-700 bg-slate-800/60">
+                      <button
+                        className="flex w-full items-center justify-between px-2 py-2 text-left text-xs font-semibold"
+                        onClick={() => setCollapsedLayers((previous) => ({ ...previous, [layer]: !collapsed }))}
+                      >
+                        <span>{layer}</span>
+                        <span>{collapsed ? "+" : "-"}</span>
+                      </button>
+                      {!collapsed ? (
+                        <div className="space-y-1 border-t border-slate-700 p-2">
+                          {nodes.map((node) => (
+                            <button
+                              key={node.id}
+                              className={`w-full rounded-md border px-2 py-2 text-left text-xs ${
+                                selectedNodeId === node.id
+                                  ? "border-amber-400 bg-amber-500/20"
+                                  : "border-slate-700 bg-slate-800/60 hover:bg-slate-800"
+                              }`}
+                              onPointerDown={(event) => handlePalettePointerDown(event, node.type)}
+                              onClick={() => setSelectedNodeId(node.id)}
+                              onDoubleClick={() => focusNode(node.id)}
+                            >
+                              <div className="font-semibold">{node.name}</div>
+                              <div className="text-slate-400">{node.type}</div>
+                              <div className="truncate text-slate-500">{node.layerTags.join(", ") || "no tags"}</div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </aside>
 
         <section
@@ -1327,6 +1946,9 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
           style={{ width: "100%", height: "100%" }}
           onClick={() => setContextMenu(null)}
         >
+          <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-full border border-slate-700/60 bg-slate-950/70 px-3 py-1.5 text-sm text-slate-500 shadow-lg backdrop-blur">
+            💡 Hold [Shift] + Drag to multi-select nodes
+          </div>
           <GraphCanvas
             flowNodes={flowNodes}
             flowEdges={flowEdges}
@@ -1477,9 +2099,9 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     </button>
                   ))}
                 </div>
-                <div className="grid grid-cols-[1fr_auto] gap-2">
+                <div className="flex flex-col gap-2">
                   <select
-                    className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
                     value={selectedTagToAdd}
                     onChange={(event) => setSelectedTagToAdd(event.target.value)}
                   >
@@ -1489,7 +2111,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                       </option>
                     ))}
                   </select>
-                  <button className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={addSelectedTag}>
+                  <button className="w-full rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={addSelectedTag}>
                     Add tag
                   </button>
                 </div>
@@ -1504,23 +2126,23 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     </button>
                   ))}
                 </div>
-                <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+                <div className="mt-2 flex flex-col gap-2">
                   <input
-                    className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
                     placeholder="Search presets"
                     value={tagSearch}
                     onChange={(event) => setTagSearch(event.target.value)}
                   />
                   <input
-                    className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
                     placeholder="new tag"
                     value={newTagInput}
                     onChange={(event) => setNewTagInput(event.target.value)}
                   />
+                  <button className="w-full rounded-md bg-indigo-600 px-3 py-1 text-sm" onClick={addNewTag}>
+                    Create new tag
+                  </button>
                 </div>
-                <button className="mt-2 w-full rounded-md bg-indigo-600 px-3 py-1 text-sm" onClick={addNewTag}>
-                  Create new tag
-                </button>
               </div>
 
               {selectedNode.type === "Act" ? (
