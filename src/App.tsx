@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
 import ReactFlow, {
   Background,
   Connection,
@@ -32,6 +33,16 @@ type AgentTask = {
   id: number;
   desc: string;
   status: string;
+};
+
+type AgentMutationRecord = {
+  type: string;
+  action: string;
+  node?: Record<string, unknown>;
+  edge?: Record<string, unknown>;
+  node_id?: string;
+  data?: Record<string, unknown>;
+  warnings?: string[];
 };
 
 const nodeTypes = {
@@ -70,6 +81,17 @@ const createSlug = (value: string): string =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+
+const isSourceTreePath = (path: string): boolean => path.startsWith("projects/") || path.startsWith("projects\\");
+
+const sanitizeFileName = (value: string): string =>
+  value
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120) || "untitled";
 
 const validateConsistency = (project: PlotProject): string[] => {
   const ids = new Set(Object.keys(project.nodes));
@@ -218,9 +240,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [agentStatus, setAgentStatus] = useState<"idle" | "planning" | "executing" | "completed" | "error">("idle");
   const [agentStatusMessage, setAgentStatusMessage] = useState<string>("");
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
-  const [stagedMutations, setStagedMutations] = useState<any[]>([]);
+  const [stagedMutations, setStagedMutations] = useState<AgentMutationRecord[]>([]);
   const [isAwaitingApproval, setIsAwaitingApproval] = useState(false);
-  const stagedMutationsRef = useRef<any[]>([]);
+  const stagedMutationsRef = useRef<AgentMutationRecord[]>([]);
+  const [lastSavedPath, setLastSavedPath] = useState<string>(() => {
+    const stored = localStorage.getItem("plot-architect:lastSavedPath") || "";
+    return stored || (isSourceTreePath(projectPath) ? "" : projectPath);
+  });
+  const [lastExportDir, setLastExportDir] = useState<string>(() => localStorage.getItem("plot-architect:lastExportDir") || "");
 
   const historyRef = useRef<PlotProject[]>([cloneProject(defaultProject)]);
   const historyIndexRef = useRef(0);
@@ -301,7 +328,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       if (payload.type === "agent:mutation") {
         // Stage mutations for human approval instead of applying directly
         setStagedMutations((prev) => {
-          const next = [...prev, payload];
+          const next = [...prev, payload as AgentMutationRecord];
           stagedMutationsRef.current = next;
           return next;
         });
@@ -813,6 +840,51 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     });
   };
 
+  const summarizeMutation = (mutation: AgentMutationRecord): string => {
+    if (mutation.action === "add_node") {
+      const nodeType = String(mutation.node?.type ?? "Node");
+      return `➕ Create Node: ${nodeType}`;
+    }
+
+    if (mutation.action === "add_edge") {
+      const source = String(mutation.edge?.source ?? "?");
+      const target = String(mutation.edge?.target ?? "?");
+      return `🔗 Connect Nodes: ${source} → ${target}`;
+    }
+
+    if (mutation.action === "update_node") {
+      return `✏️ Update Node: ${String(mutation.node_id ?? "unknown")}`;
+    }
+
+    return `• ${mutation.action}`;
+  };
+
+  const allStagedWarnings = useMemo(
+    () => stagedMutations.flatMap((mutation) => mutation.warnings ?? []),
+    [stagedMutations],
+  );
+
+  const handleApprove = () => {
+    const staged = stagedMutationsRef.current.slice();
+    staged.forEach((mutation) => {
+      if (!mutation || typeof mutation !== "object") return;
+      if (mutation.action === "add_node" && mutation.node) applyAgentNodeMutation(mutation.node as Record<string, unknown>);
+      if (mutation.action === "add_edge" && mutation.edge) applyAgentEdgeMutation(mutation.edge as Record<string, unknown>);
+      if (mutation.action === "update_node" && typeof mutation.node_id === "string" && mutation.data) applyAgentUpdateMutation(String(mutation.node_id), mutation.data as Record<string, unknown>);
+    });
+    setStagedMutations([]);
+    stagedMutationsRef.current = [];
+    setIsAwaitingApproval(false);
+    setStatus(`Applied ${staged.length} agent change(s)`);
+  };
+
+  const handleReject = () => {
+    setStagedMutations([]);
+    stagedMutationsRef.current = [];
+    setIsAwaitingApproval(false);
+    setStatus("Rejected agent changes");
+  };
+
   const removeNode = (nodeId: string) => {
     commitProject((previous) => {
       if (!previous.nodes[nodeId]) {
@@ -1074,16 +1146,42 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const saveProject = useCallback(async (proj?: PlotProject) => {
     const payload = JSON.stringify(proj ?? project, null, 2);
     try {
-      await invoke("save_project_json", { path: projectPath, payload });
-      setStatus(`Saved — ${projectPath}`);
+      let targetPath = lastSavedPath;
+
+      if (!targetPath) {
+        const selected = await dialogSave({
+          defaultPath: `${sanitizeFileName(project.meta.title || projectName)}.plot.json`,
+          filters: [{ name: "Plot Project", extensions: ["json"] }],
+        });
+
+        if (!selected) {
+          setStatus("Save cancelled");
+          return;
+        }
+
+        targetPath = selected;
+        setLastSavedPath(selected);
+      }
+
+      await invoke("save_project_json", { path: targetPath, payload });
+      setStatus(`Saved — ${targetPath}`);
     } catch (error) {
       setStatus(`Save failed: ${String(error)}`);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, projectPath]);
+  }, [project, lastSavedPath, project.meta.title, projectName]);
 
   const exportProject = async () => {
-    const fileName = `../exports/project-${Date.now()}.plot.json`;
+    const fileName = await dialogSave({
+      defaultPath: `project-${Date.now()}.plot.json`,
+      filters: [{ name: "Plot Project", extensions: ["json"] }],
+    });
+
+    if (!fileName) {
+      setStatus("Export cancelled");
+      return;
+    }
+
     const payload = JSON.stringify(project, null, 2);
     try {
       await invoke("export_project_json", { path: fileName, payload });
@@ -1096,9 +1194,25 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const exportModularProject = async () => {
     try {
       const payload: Record<string, string> = {};
-      const exportDir = `../exports/modular-${Date.now()}`;
+      let exportDir = lastExportDir;
 
-      payload[`${exportDir}/project_settings.json`] = JSON.stringify(
+      if (!exportDir) {
+        const selected = await dialogOpen({
+          directory: true,
+          multiple: false,
+          defaultPath: `modular-${Date.now()}`,
+        });
+
+        if (typeof selected !== "string" || !selected) {
+          setStatus("Modular export cancelled");
+          return;
+        }
+
+        exportDir = selected;
+        setLastExportDir(selected);
+      }
+
+      payload["project_settings.json"] = JSON.stringify(
         {
           globalStylePrompt: project.globalStylePrompt,
         },
@@ -1107,27 +1221,28 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       );
 
       project.characters.forEach((char) => {
-        payload[`${exportDir}/Lore/characters/${char.id}.md`] = project.lore?.[char.id] || "";
+        payload[`Lore/characters/${sanitizeFileName(char.id)}.md`] = project.lore?.[char.id] || "";
       });
       project.locations.forEach((loc) => {
-        payload[`${exportDir}/Lore/locations/${loc.id}.md`] = project.lore?.[loc.id] || "";
+        payload[`Lore/locations/${sanitizeFileName(loc.title)}.md`] = project.lore?.[loc.id] || "";
       });
       project.layerPresets.forEach((tag) => {
-        payload[`${exportDir}/Lore/tags/${tag}.md`] = project.lore?.[tag] || "";
+        payload[`Lore/tags/${sanitizeFileName(tag)}.md`] = project.lore?.[tag] || "";
       });
 
       Object.keys(project.nodes).forEach((nodeId) => {
         const node = project.nodes[nodeId];
         let folderName = "Uncategorized";
         if (node.layerTags.length > 0) {
-           folderName = node.layerTags[0].replace(/[^a-zA-Z0-9]/g, '_');
+           folderName = sanitizeFileName(node.layerTags[0]);
         }
-        payload[`${exportDir}/Acts/${folderName}/${node.id}.json`] = JSON.stringify(sanitizeNodeForAI(node), null, 2);
+        const displayName = sanitizeFileName(node.name || (node.type === "Act" ? node.parameters.title : node.type));
+        payload[`Acts/${folderName}/${sanitizeFileName(`${node.type}_${displayName}`)}.json`] = JSON.stringify(sanitizeNodeForAI(node), null, 2);
       });
 
-      payload[`${exportDir}/progress_state.json`] = JSON.stringify({ current_node: project.startNodeId || project.acts[0] || "", context_bridge: "" }, null, 2);
+      payload["progress_state.json"] = JSON.stringify({ current_node: project.startNodeId || project.acts[0] || "", context_bridge: "" }, null, 2);
 
-      await invoke("export_modular_project", { payload: JSON.stringify(payload) });
+      await invoke("export_modular_project", { exportDir, payload: JSON.stringify(payload) });
       setLastExportPath(exportDir);
       console.log("Exported to:", exportDir);
       setStatus(`Exported modular project to ${exportDir}`);
@@ -1524,6 +1639,22 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   }, [aiChatMessages]);
 
   useEffect(() => {
+    if (lastSavedPath) {
+      localStorage.setItem("plot-architect:lastSavedPath", lastSavedPath);
+    } else {
+      localStorage.removeItem("plot-architect:lastSavedPath");
+    }
+  }, [lastSavedPath]);
+
+  useEffect(() => {
+    if (lastExportDir) {
+      localStorage.setItem("plot-architect:lastExportDir", lastExportDir);
+    } else {
+      localStorage.removeItem("plot-architect:lastExportDir");
+    }
+  }, [lastExportDir]);
+
+  useEffect(() => {
     setProject((previous) => ({
       ...previous,
       aiChatHistory: aiChatMessages,
@@ -1719,41 +1850,53 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
               {isAwaitingApproval && (
                 <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-900/20 p-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-start justify-between gap-4">
                     <div>
                       <div className="text-sm font-semibold text-amber-200">Review Changes</div>
                       <div className="text-xs text-amber-300">{stagedMutations.length} proposed change(s) from the agent pending your approval.</div>
+                      <div className="mt-3 space-y-2">
+                        {stagedMutations.map((mutation, index) => (
+                          <div key={`${mutation.action}-${mutation.node_id ?? mutation.edge?.id ?? index}`} className="rounded-lg border border-amber-500/20 bg-slate-950/50 px-3 py-2 text-xs text-amber-50">
+                            <div className="font-semibold text-amber-100">{summarizeMutation(mutation)}</div>
+                            {mutation.warnings && mutation.warnings.length > 0 ? (
+                              <div className="mt-2 space-y-1 text-amber-200">
+                                {mutation.warnings.map((warning, warningIndex) => (
+                                  <div key={`${warningIndex}-${warning}`} className="flex gap-2">
+                                    <span>⚠️</span>
+                                    <span>{warning}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                      {allStagedWarnings.length > 0 ? (
+                        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                          <div className="font-semibold uppercase tracking-wider text-amber-200">Warnings</div>
+                          <div className="mt-2 space-y-1">
+                            {allStagedWarnings.map((warning, index) => (
+                              <div key={`${warning}-${index}`} className="flex gap-2">
+                                <span>⚠️</span>
+                                <span>{warning}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                     <div className="flex gap-2">
                       <button
                         type="button"
                         className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-semibold"
-                        onClick={() => {
-                          // Apply staged mutations
-                          const staged = stagedMutationsRef.current.slice();
-                          staged.forEach((p) => {
-                            if (!p || typeof p !== "object") return;
-                            if (p.action === "add_node" && p.node) applyAgentNodeMutation(p.node as Record<string, unknown>);
-                            if (p.action === "add_edge" && p.edge) applyAgentEdgeMutation(p.edge as Record<string, unknown>);
-                            if (p.action === "update_node" && typeof p.node_id === "string" && p.data) applyAgentUpdateMutation(String(p.node_id), p.data as Record<string, unknown>);
-                          });
-                          setStagedMutations([]);
-                          stagedMutationsRef.current = [];
-                          setIsAwaitingApproval(false);
-                          setStatus(`Applied ${staged.length} agent change(s)`);
-                        }}
+                        onClick={handleApprove}
                       >
                         Approve
                       </button>
                       <button
                         type="button"
                         className="rounded-md bg-rose-600 px-3 py-1 text-sm font-semibold"
-                        onClick={() => {
-                          setStagedMutations([]);
-                          stagedMutationsRef.current = [];
-                          setIsAwaitingApproval(false);
-                          setStatus("Rejected agent changes");
-                        }}
+                        onClick={handleReject}
                       >
                         Reject
                       </button>

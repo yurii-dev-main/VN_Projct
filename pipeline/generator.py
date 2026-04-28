@@ -14,6 +14,14 @@ load_dotenv()
 
 client = genai.Client()
 
+
+def sanitize_filename(value: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(value))
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    cleaned = cleaned.strip("._ ")
+    return cleaned[:120] if cleaned else "untitled"
+
 PROMPT_TEMPLATE = """Ты — профессиональный сценарист визуальных новелл. Твоя задача: написать текст и диалоги для одной конкретной сцены строго по заданным правилам, не забегая вперед сюжета. Формат вывода: имя персонажа и его реплика/действие.
 
 [ГЛОБАЛЬНЫЕ ПРАВИЛА СТИЛЯ И ФОРМАТИРОВАНИЯ]
@@ -227,8 +235,10 @@ async def process_scene_node(
     prompt = build_prompt(node, lore_db, bridge_summary, context, global_style_prompt)
     scene_text = await generate_text(prompt)
     
-    # Save output
-    output_path = os.path.join(export_dir, f"{node_id}_output.txt")
+    # Save output using a semantic, human-readable filename.
+    display_name = node.get("name") or node.get("parameters", {}).get("title") or node_id
+    semantic_name = sanitize_filename(f"{node.get('type', 'Scene')}_{display_name}")
+    output_path = os.path.join(export_dir, f"{semantic_name}_output.txt")
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(scene_text)
     

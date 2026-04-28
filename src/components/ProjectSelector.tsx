@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
 
 // ─────────────────────────────────────────────
 //  Types
@@ -22,10 +23,9 @@ interface ProjectSelectorProps {
 export function slugify(value: string): string {
   return value
     .trim()
-    .toLowerCase()
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, "") // strip invalid chars
     .replace(/\s+/g, "_")                   // spaces → underscores
-    .replace(/[^a-z0-9_\-]/g, "")           // keep only safe chars
+    .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")               // trim leading/trailing underscores
     .slice(0, 64);                           // cap length
 }
@@ -84,7 +84,6 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
       return;
     }
 
-    const path = `projects/${slug}.plot.json`;
     const emptyProject = JSON.stringify({
       acts: [],
       routes: [],
@@ -98,13 +97,43 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
     setCreating(true);
     setError(null);
     try {
+      const path = await dialogSave({
+        defaultPath: `${slug}.plot.json`,
+        filters: [{ name: "Plot Project", extensions: ["json"] }],
+      });
+
+      if (!path) {
+        return;
+      }
+
       await invoke("save_project_json", { path, payload: emptyProject });
       setNewName("");
-      await reload();
+      onOpen(path, slug);
     } catch (err) {
       setError(String(err));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleOpenProject = async () => {
+    setError(null);
+    try {
+      const selected = await dialogOpen({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Plot Project", extensions: ["json"] }],
+      });
+
+      if (typeof selected !== "string" || !selected) {
+        return;
+      }
+
+      const fileName = selected.split(/[\\/]/).pop() || selected;
+      const projectName = fileName.replace(/\.plot\.json$/i, "").replace(/\.json$/i, "");
+      onOpen(selected, projectName);
+    } catch (err) {
+      setError(String(err));
     }
   };
 
@@ -212,6 +241,22 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
 
         {/* Create new project */}
         <div style={{ display: "flex", gap: 8 }}>
+          <button
+            id="open-project-btn"
+            onClick={handleOpenProject}
+            style={{
+              background: "rgba(15,23,42,0.8)",
+              border: "1px solid rgba(100,116,139,0.4)",
+              borderRadius: 8,
+              padding: "8px 18px",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#e2e8f0",
+              cursor: "pointer",
+            }}
+          >
+            Open Project File
+          </button>
           <input
             id="new-project-name"
             type="text"

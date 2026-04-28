@@ -296,6 +296,7 @@ def execute_plan(user_prompt: str, context_json: str, tasks: List[Dict[str, Any]
         task_id = int(task.get("id", 0))
         task_desc = str(task.get("desc", "")).strip()
         emit({"type": "agent:status", "status": "executing", "message": f"Executing task {task_id}: {task_desc}"})
+        task_warnings: List[str] = []
 
         try:
             action = request_tool_action(user_prompt, context_json, tasks, task, execution_state)
@@ -436,8 +437,9 @@ def execute_plan(user_prompt: str, context_json: str, tasks: List[Dict[str, Any]
                         if rid:
                             resolved.append(rid)
                         else:
-                            # Emit a non-fatal warning so the UI reviewer knows this name was skipped
-                            emit({"type": "agent:status", "status": "executing", "message": f"Warning: Could not find character '{candidate}' in lore, skipped."})
+                            warning = f"Warning: Could not find character '{candidate}' in lore, skipped."
+                            task_warnings.append(warning)
+                            emit({"type": "agent:status", "status": "executing", "message": warning})
                     if resolved:
                         data["actingCharacters"] = resolved
 
@@ -447,21 +449,27 @@ def execute_plan(user_prompt: str, context_json: str, tasks: List[Dict[str, Any]
                     if rid:
                         data["locationId"] = rid
                     else:
-                        emit({"type": "agent:status", "status": "executing", "message": f"Warning: Could not find location '{loc_cand}' in lore, skipped."})
+                        warning = f"Warning: Could not find location '{loc_cand}' in lore, skipped."
+                        task_warnings.append(warning)
+                        emit({"type": "agent:status", "status": "executing", "message": warning})
 
                 # Only emit fields that were provided
-                emit({
+                mutation_payload: Dict[str, Any] = {
                     "type": "agent:mutation",
                     "action": "update_node",
                     "node_id": node_id,
                     "data": data,
-                })
+                }
+                if task_warnings:
+                    mutation_payload["warnings"] = task_warnings
+                emit(mutation_payload)
 
                 execution_state["last_action"] = {
                     "task_id": task_id,
                     "tool": "update_node",
                     "node_id": node_id,
                     "data": data,
+                    "warnings": task_warnings,
                 }
                 emit_task_update(task_id, "completed")
                 continue

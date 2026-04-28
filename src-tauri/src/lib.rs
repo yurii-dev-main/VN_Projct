@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::thread;
@@ -11,10 +11,7 @@ use tauri::Emitter;
 
 /// Reject any path that contains directory-traversal sequences.
 fn guard_path(path: &str) -> Result<(), String> {
-    if path.starts_with("../exports/") && path.matches("..").count() == 1 && !path.contains("//") && !path.contains('\\') {
-        return Ok(());
-    }
-    if path.contains("..") || path.contains("//") || path.contains('\\') {
+    if Path::new(path).components().any(|component| matches!(component, Component::ParentDir)) {
         return Err(format!(
             "Rejected unsafe path '{}': directory traversal is not allowed.",
             path
@@ -36,10 +33,6 @@ fn ensure_projects_dir() -> Result<(), String> {
 #[tauri::command]
 fn save_project_json(path: &str, payload: &str) -> Result<(), String> {
     guard_path(path)?;
-    // If the caller is saving into projects/, make sure the dir exists.
-    if path.starts_with("projects/") || path.starts_with("projects\\") {
-        ensure_projects_dir()?;
-    }
     write_json(path, payload)
 }
 
@@ -155,19 +148,24 @@ fn export_project_json(path: &str, payload: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn export_modular_project(payload: &str) -> Result<(), String> {
+fn export_modular_project(export_dir: &str, payload: &str) -> Result<(), String> {
     let files: std::collections::HashMap<String, String> = serde_json::from_str(payload)
         .map_err(|err| format!("Failed to parse payload: {}", err))?;
 
-    std::fs::create_dir_all("../exports")
-        .map_err(|err| format!("Failed to create '../exports' directory: {}", err))?;
+    let export_root = Path::new(export_dir);
+    if export_root.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err(format!("Rejected unsafe export directory '{}'.", export_dir));
+    }
 
-    for (path, content) in files {
-        // Only allow exporting to ../exports/ safely
-        if !path.starts_with("../exports/") || path.matches("..").count() > 1 || path.contains("//") || path.contains('\\') {
-            return Err(format!("Rejected unsafe export path '{}'.", path));
+    std::fs::create_dir_all(export_root)
+        .map_err(|err| format!("Failed to create export directory '{}': {}", export_root.display(), err))?;
+
+    for (relative_path, content) in files {
+        let relative_target = Path::new(&relative_path);
+        if relative_target.is_absolute() || relative_target.components().any(|component| matches!(component, Component::ParentDir)) {
+            return Err(format!("Rejected unsafe export path '{}'.", relative_path));
         }
-        let target = Path::new(&path);
+        let target: PathBuf = export_root.join(relative_target);
 
         if let Some(parent) = target.parent() {
             if !parent.as_os_str().is_empty() {
@@ -176,11 +174,11 @@ fn export_modular_project(payload: &str) -> Result<(), String> {
             }
         }
 
-        if path.ends_with(".md") && target.exists() {
+        if relative_path.ends_with(".md") && target.exists() {
             continue;
         }
 
-        fs::write(target, content).map_err(|err| format!("Failed to write '{}': {}", path, err))?;
+        fs::write(&target, content).map_err(|err| format!("Failed to write '{}': {}", target.display(), err))?;
     }
 
     Ok(())
@@ -361,6 +359,7 @@ fn write_json(path: &str, payload: &str) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             save_project_json,
