@@ -6,6 +6,7 @@ type PlotNodeData = {
   node: PlotNodeType;
   isSelected: boolean;
   isActiveGenNode?: boolean;
+  isSearchActive?: boolean;
 };
 
 const nodeTypeColor: Record<PlotNodeType["type"], string> = {
@@ -25,8 +26,12 @@ export const PlotNode = React.memo(function PlotNode({ data }: NodeProps<PlotNod
     <div
       className={`min-w-[220px] rounded-xl border bg-slate-900/95 p-3 text-slate-100 shadow-xl transition-all duration-300 ${data.isActiveGenNode ? "animate-pulse" : ""}`}
       style={{
-        borderColor: data.isActiveGenNode ? "#a855f7" : data.isSelected ? "#f59e0b" : "#334155",
-        boxShadow: data.isActiveGenNode ? "0 0 15px rgba(168, 85, 247, 0.6)" : `0 0 0 2px ${data.isSelected ? "rgba(245,158,11,0.25)" : "transparent"}`,
+        borderColor: data.isSearchActive ? "#0ea5e9" : data.isActiveGenNode ? "#a855f7" : data.isSelected ? "#f59e0b" : "#334155",
+        boxShadow: data.isSearchActive
+          ? "0 0 20px rgba(6, 182, 212, 0.8), 0 0 40px rgba(6, 182, 212, 0.4)"
+          : data.isActiveGenNode
+            ? "0 0 15px rgba(168, 85, 247, 0.6)"
+            : `0 0 0 2px ${data.isSelected ? "rgba(245,158,11,0.25)" : "transparent"}`,
       }}
     >
       <Handle type="target" position={Position.Left} id="in" className="!h-3 !w-3 !bg-amber-400" />

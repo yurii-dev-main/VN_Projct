@@ -6,6 +6,7 @@ type ActNodeData = {
   node: ActNodeType;
   isSelected: boolean;
   isActiveGenNode?: boolean;
+  isSearchActive?: boolean;
 };
 
 export const ActNode = React.memo(function ActNode({ data }: NodeProps<ActNodeData>) {
@@ -17,16 +18,18 @@ export const ActNode = React.memo(function ActNode({ data }: NodeProps<ActNodeDa
     <div
       className={`min-w-[320px] rounded-2xl border-2 px-4 py-3 text-slate-50 shadow-2xl transition-all duration-300 ${data.isActiveGenNode ? "animate-pulse" : ""}`}
       style={{
-        borderColor: data.isActiveGenNode ? "#f472b6" : isStart ? "#10b981" : data.isSelected ? "#facc15" : "#7c3aed",
+        borderColor: data.isSearchActive ? "#0ea5e9" : data.isActiveGenNode ? "#f472b6" : isStart ? "#10b981" : data.isSelected ? "#facc15" : "#7c3aed",
         background:
           "linear-gradient(135deg, rgba(88,28,135,0.98) 0%, rgba(67,56,202,0.96) 55%, rgba(30,41,59,0.96) 100%)",
-        boxShadow: data.isActiveGenNode
-          ? "0 0 20px rgba(244, 114, 182, 0.7), 0 18px 40px rgba(76,29,149,0.5)"
-          : isStart
-          ? "0 0 0 3px rgba(16,185,129,0.35), 0 18px 40px rgba(76,29,149,0.35)"
-          : data.isSelected
-            ? "0 0 0 2px rgba(250,204,21,0.25)"
-            : "0 18px 40px rgba(76,29,149,0.35)",
+        boxShadow: data.isSearchActive
+          ? "0 0 25px rgba(6, 182, 212, 0.8), 0 18px 40px rgba(6, 182, 212, 0.3)"
+          : data.isActiveGenNode
+            ? "0 0 20px rgba(244, 114, 182, 0.7), 0 18px 40px rgba(76,29,149,0.5)"
+            : isStart
+              ? "0 0 0 3px rgba(16,185,129,0.35), 0 18px 40px rgba(76,29,149,0.35)"
+              : data.isSelected
+                ? "0 0 0 2px rgba(250,204,21,0.25)"
+                : "0 18px 40px rgba(76,29,149,0.35)",
       }}
     >
       <Handle type="target" position={Position.Left} id="in" className="!h-3 !w-3 !bg-amber-300" />
@@ -62,4 +65,4 @@ export const ActNode = React.memo(function ActNode({ data }: NodeProps<ActNodeDa
       {node.parameters.description ? <div className="mt-3 text-sm text-violet-50/85">{node.parameters.description}</div> : null}
     </div>
   );
-});
+});

@@ -23,6 +23,7 @@ import { RouteInspector } from "./components/RouteInspector";
 import { createDefaultNode, defaultProject } from "./data/defaultProject";
 import { AIChatMessage, ActNode, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode } from "./types/plot";
 import { sanitizeNodeForAI } from "./utils/aiExport";
+import { getLayoutedElements } from "./utils/layout";
 
 type ContextMenuState =
   | { kind: "node"; nodeId: string; x: number; y: number }
@@ -248,6 +249,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     return stored || (isSourceTreePath(projectPath) ? "" : projectPath);
   });
   const [lastExportDir, setLastExportDir] = useState<string>(() => localStorage.getItem("plot-architect:lastExportDir") || "");
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<string[]>([]);
+  const [currentSearchIndex, setCurrentSearchIndex] = useState(0);
+
+  // Play mode state
+  const [playModeNodeId, setPlayModeNodeId] = useState<string | null>(null);
 
   const historyRef = useRef<PlotProject[]>([cloneProject(defaultProject)]);
   const historyIndexRef = useRef(0);
@@ -649,6 +658,142 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     setSelectedTagToAdd((current) => current || layerCatalog[0] || "");
   }, [layerCatalog]);
 
+  // Search logic
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      setCurrentSearchIndex(0);
+      return;
+    }
+
+    const query = searchQuery.toLowerCase();
+    const matched: string[] = [];
+
+    Object.values(project.nodes).forEach((node) => {
+      // Search in node name
+      if (node.name.toLowerCase().includes(query)) {
+        matched.push(node.id);
+        return;
+      }
+
+      // Search in node-type-specific properties
+      if (node.type === "Act") {
+        if (node.parameters.title?.toString().toLowerCase().includes(query) ||
+            node.parameters.description?.toString().toLowerCase().includes(query)) {
+          matched.push(node.id);
+          return;
+        }
+      }
+
+      if (node.type === "Route") {
+        if (node.parameters.title?.toString().toLowerCase().includes(query)) {
+          matched.push(node.id);
+          return;
+        }
+      }
+
+      if (node.type === "Scene") {
+        if (node.parameters.narrativeAction?.toString().toLowerCase().includes(query) ||
+            node.parameters.goal?.toString().toLowerCase().includes(query) ||
+            node.parameters.constraints?.toString().toLowerCase().includes(query)) {
+          matched.push(node.id);
+          return;
+        }
+
+        // Search in dialogue variants
+        if (Array.isArray(node.parameters.dialogueVariants)) {
+          const hasMatchingDialogue = node.parameters.dialogueVariants.some(
+            (d) => d.text?.toLowerCase().includes(query)
+          );
+          if (hasMatchingDialogue) {
+            matched.push(node.id);
+            return;
+          }
+        }
+      }
+
+      if (node.type === "BranchPoint") {
+        // Search in branch labels and choices
+        const branchLabels = Array.isArray(node.parameters.branches)
+          ? node.parameters.branches.some((b) => b.label?.toLowerCase().includes(query))
+          : false;
+
+        const choiceText = Array.isArray(node.parameters.choices)
+          ? node.parameters.choices.some((c) => c.text?.toLowerCase().includes(query))
+          : false;
+
+        if (branchLabels || choiceText) {
+          matched.push(node.id);
+        }
+      }
+    });
+
+    setSearchResults(matched);
+    setCurrentSearchIndex(0);
+  }, [searchQuery, project.nodes]);
+
+  const focusSearchResult = (nodeId: string) => {
+    const node = project.nodes[nodeId];
+    if (!node || !flowInstanceRef.current) return;
+
+    const NODE_WIDTH = 300;
+    const NODE_HEIGHT = 150;
+
+    flowInstanceRef.current.setCenter(
+      node.position.x + NODE_WIDTH / 2,
+      node.position.y + NODE_HEIGHT / 2,
+      { zoom: 1.2, duration: 500 },
+    );
+
+    // Highlight the node by setting it as selected
+    setSelectedNodeId(nodeId);
+  };
+
+  const handleSearchNext = () => {
+    if (searchResults.length === 0) return;
+    const nextIndex = (currentSearchIndex + 1) % searchResults.length;
+    setCurrentSearchIndex(nextIndex);
+    focusSearchResult(searchResults[nextIndex]);
+  };
+
+  const handleSearchPrev = () => {
+    if (searchResults.length === 0) return;
+    const prevIndex = currentSearchIndex === 0 ? searchResults.length - 1 : currentSearchIndex - 1;
+    setCurrentSearchIndex(prevIndex);
+    focusSearchResult(searchResults[prevIndex]);
+  };
+
+  // Play mode helper functions
+  const getNextNodeForPlayMode = (currentNodeId: string): string | null => {
+    const currentNode = project.nodes[currentNodeId];
+    if (!currentNode) return null;
+
+    if (currentNode.type === "Scene") {
+      const scene = currentNode as SceneNode;
+      return scene.parameters.defaultNextNode || currentNode.connectedTo[0] || null;
+    }
+
+    // For Act, Route, Event, or other types: use first connectedTo
+    return currentNode.connectedTo[0] || null;
+  };
+
+  const getChoiceTarget = (nodeId: string, choiceId: string): string | null => {
+    const node = project.nodes[nodeId];
+    if (node?.type !== "BranchPoint") return null;
+
+    const branchPoint = node as BranchPointNode;
+    const choice = branchPoint.parameters.choices.find((c) => c.id === choiceId);
+    return choice?.nextNode || null;
+  };
+
+  const handlePlayModeNavigate = (nextNodeId: string | null) => {
+    if (!nextNodeId) {
+      setPlayModeNodeId(null);
+      setStatus("Play mode ended");
+      return;
+    }
+    setPlayModeNodeId(nextNodeId);
+  };
 
   const loadLoreText = (id: string) => {
     setSelectedLoreId(id);
@@ -758,9 +903,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
             node,
             isSelected: node.id === selectedNodeId,
             isActiveGenNode: node.id === activeGenNodeId,
+            isSearchActive: searchResults.length > 0 && node.id === searchResults[currentSearchIndex],
           },
         })),
-    [allNodes, selectedNodeId, visibleNodeIds, activeGenNodeId],
+    [allNodes, selectedNodeId, visibleNodeIds, activeGenNodeId, searchResults, currentSearchIndex],
   );
 
   const flowEdges = useMemo<Edge[]>(() => {
@@ -866,6 +1012,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
   const handleApprove = () => {
     const staged = stagedMutationsRef.current.slice();
+    const hasAddedNodes = staged.some((mutation) => mutation?.action === "add_node" && mutation.node);
     staged.forEach((mutation) => {
       if (!mutation || typeof mutation !== "object") return;
       if (mutation.action === "add_node" && mutation.node) applyAgentNodeMutation(mutation.node as Record<string, unknown>);
@@ -876,6 +1023,13 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     stagedMutationsRef.current = [];
     setIsAwaitingApproval(false);
     setStatus(`Applied ${staged.length} agent change(s)`);
+
+    if (hasAddedNodes) {
+      // Auto-arrange only when the AI introduced new nodes, which is the common overlap case.
+      setTimeout(() => {
+        handleAutoLayout();
+      }, 150);
+    }
   };
 
   const handleReject = () => {
@@ -883,6 +1037,33 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     stagedMutationsRef.current = [];
     setIsAwaitingApproval(false);
     setStatus("Rejected agent changes");
+  };
+
+  const handleAutoLayout = () => {
+    const flowInstance = flowInstanceRef.current;
+    if (!flowInstance) return;
+
+    // Get current nodes and edges
+    const allPlotNodes = Object.values(project.nodes);
+    const { nodes: layoutedNodes } = getLayoutedElements(allPlotNodes, flowEdges);
+
+    // Update project with new positions
+    commitProject((prev) => {
+      const updated = cloneProject(prev);
+      layoutedNodes.forEach((node) => {
+        if (updated.nodes[node.id]) {
+          updated.nodes[node.id].position = node.position;
+        }
+      });
+      return updated;
+    });
+
+    // Fit view with smooth animation
+    setTimeout(() => {
+      flowInstance.fitView({ duration: 800, padding: 0.2 });
+    }, 100);
+
+    setStatus("Auto-arranged nodes");
   };
 
   const removeNode = (nodeId: string) => {
@@ -1751,6 +1932,40 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
           <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); saveProject(); }}>
             Save Project
           </button>
+
+          {/* Search Bar */}
+          <div className="flex items-center gap-2 rounded-md border border-slate-600 bg-slate-800 px-2 py-1">
+            <input
+              type="text"
+              placeholder="🔍 Search nodes..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-40 bg-slate-800 text-sm text-slate-100 placeholder-slate-500 outline-none"
+            />
+            {searchResults.length > 0 && (
+              <span className="text-xs font-medium text-slate-300">
+                {currentSearchIndex + 1} / {searchResults.length}
+              </span>
+            )}
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 text-sm hover:bg-slate-700 disabled:opacity-50"
+              onClick={handleSearchPrev}
+              disabled={searchResults.length === 0}
+              title="Previous result"
+            >
+              &lt;
+            </button>
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 text-sm hover:bg-slate-700 disabled:opacity-50"
+              onClick={handleSearchNext}
+              disabled={searchResults.length === 0}
+              title="Next result"
+            >
+              &gt;
+            </button>
+          </div>
           <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); exportProject(); }}>
             Export JSON
           </button>
@@ -1768,6 +1983,20 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
           <button type="button" className="rounded-md bg-amber-600 px-3 py-1 text-sm font-semibold text-slate-950" onClick={(e) => { e.preventDefault(); validate(); }}>
             Validate Consistency
           </button>
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1 text-sm font-semibold ${selectedFlowNodeIds.length === 1 ? "bg-emerald-600" : "bg-slate-600 cursor-not-allowed"}`}
+            onClick={(e) => {
+              e.preventDefault();
+              if (selectedFlowNodeIds.length === 1) {
+                setPlayModeNodeId(selectedFlowNodeIds[0]);
+                setStatus("Play mode started");
+              }
+            }}
+            disabled={selectedFlowNodeIds.length !== 1}
+          >
+            ▶ Play from Selected
+          </button>
           <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); setActiveLayerTags([]); }}>
             Switch Layer: Global
           </button>
@@ -1777,11 +2006,150 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
           <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); redo(); }}>
             Redo
           </button>
+          <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); handleAutoLayout(); }}>
+            🪄 Auto-Arrange
+          </button>
         </div>
       </header>
 
       {activeView === "graph" ? (
       <main className="grid grid-cols-[20%_60%_20%]" style={{ flex: 1, minHeight: 0 }}>
+              {/* Play Mode Modal */}
+              {playModeNodeId && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-8">
+                  {(() => {
+                    const currentNode = project.nodes[playModeNodeId];
+                    if (!currentNode) {
+                      return (
+                        <div className="flex w-full max-w-3xl flex-col gap-4 rounded-2xl border border-slate-600 bg-slate-900 p-6 text-slate-100">
+                          <p>Node not found.</p>
+                          <button
+                            type="button"
+                            className="rounded-md bg-slate-700 px-4 py-2 text-sm"
+                            onClick={() => setPlayModeNodeId(null)}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    const isBranchPoint = currentNode.type === "BranchPoint";
+                    const isScene = currentNode.type === "Scene";
+
+                    return (
+                      <div className="relative flex w-full max-w-3xl flex-col gap-4 rounded-2xl border border-slate-600 bg-gradient-to-b from-slate-900 to-slate-950 p-8 text-slate-100 shadow-2xl">
+                        {/* Close button */}
+                        <button
+                          type="button"
+                          className="absolute right-4 top-4 rounded-md bg-slate-700 px-3 py-1 text-sm hover:bg-slate-600"
+                          onClick={() => setPlayModeNodeId(null)}
+                        >
+                          ✕ Close
+                        </button>
+
+                        {/* Node title/name */}
+                        <div className="pr-12">
+                          <div className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+                            {currentNode.type}
+                          </div>
+                          <h2 className="mt-2 text-2xl font-bold text-slate-50">{currentNode.name}</h2>
+                        </div>
+
+                        {/* Node content based on type */}
+                        <div className="flex-1 space-y-4 rounded-lg border border-slate-700/50 bg-slate-800/30 p-4">
+                          {isScene && (() => {
+                            const scene = currentNode as SceneNode;
+                            return (
+                              <div className="space-y-3">
+                                {scene.parameters.narrativeAction && (
+                                  <p className="text-sm leading-relaxed text-slate-200">
+                                    {scene.parameters.narrativeAction}
+                                  </p>
+                                )}
+                                {scene.parameters.dialogueVariants.length > 0 && (
+                                  <div className="space-y-2 border-t border-slate-700/50 pt-3">
+                                    {scene.parameters.dialogueVariants.map((variant) => (
+                                      <div key={variant.id} className="text-sm text-slate-300">
+                                        <span className="font-semibold text-emerald-400">Dialogue:</span> {variant.text}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+
+                          {isBranchPoint && (() => {
+                            const branch = currentNode as BranchPointNode;
+                            return (
+                              <div className="space-y-2">
+                                <p className="text-sm text-slate-300">
+                                  {branch.parameters.conditionType === "playerChoice"
+                                    ? "What do you choose?"
+                                    : `Branching logic: ${branch.parameters.conditionType}`}
+                                </p>
+                              </div>
+                            );
+                          })()}
+
+                          {(currentNode.type === "Act" || currentNode.type === "Route" || currentNode.type === "Event") && (
+                            <div className="text-sm text-slate-300">
+                              {String((currentNode as ActNode | RouteNode | EventNode).parameters.description || `[${currentNode.type} node]`)}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Navigation buttons */}
+                        <div className="flex gap-3">
+                          {isBranchPoint && (() => {
+                            const branch = currentNode as BranchPointNode;
+                            return (
+                              <>
+                                {branch.parameters.choices.map((choice) => {
+                                  const nextNodeId = getChoiceTarget(playModeNodeId, choice.id);
+                                  return (
+                                    <button
+                                      key={choice.id}
+                                      type="button"
+                                      className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                                        nextNodeId
+                                          ? "bg-blue-600 hover:bg-blue-700"
+                                          : "bg-slate-600 cursor-not-allowed opacity-50"
+                                      }`}
+                                      onClick={() => handlePlayModeNavigate(nextNodeId)}
+                                      disabled={!nextNodeId}
+                                    >
+                                      {choice.text || "Unnamed Choice"}
+                                    </button>
+                                  );
+                                })}
+                              </>
+                            );
+                          })()}
+
+                          {!isBranchPoint && (() => {
+                            const nextNodeId = getNextNodeForPlayMode(playModeNodeId);
+                            return (
+                              <button
+                                type="button"
+                                className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                                  nextNodeId
+                                    ? "bg-emerald-600 hover:bg-emerald-700"
+                                    : "bg-slate-600 cursor-not-allowed opacity-50"
+                                }`}
+                                onClick={() => handlePlayModeNavigate(nextNodeId)}
+                              >
+                                {nextNodeId ? "Continue →" : "End of Path"}
+                              </button>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
         <aside className="flex min-h-0 flex-col border-r border-slate-700/80 bg-slate-900/65 p-3 overflow-hidden">
           <div className="mb-3 rounded-xl border border-slate-700/70 bg-slate-950/80 p-1">
             <div className="grid grid-cols-2 gap-1">
@@ -3038,3 +3406,4 @@ function App() {
 }
 
 export default App;
+
