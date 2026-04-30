@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::Stdio;
 use std::thread;
 use tauri::Emitter;
@@ -276,43 +276,41 @@ fn run_agent_planner(app: tauri::AppHandle, prompt: String, context_json: String
             })
         });
 
-        let stderr_handle = child.stderr.take().map(|stderr| {
-            let app = app.clone();
-            thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines() {
-                    if let Ok(line) = line {
-                        app.emit(
-                            "agent-event",
-                            serde_json::json!({
-                                "type": "agent:status",
-                                "status": "error",
-                                "message": line,
-                            }),
-                        )
-                        .ok();
-                    }
-                }
-            })
-        });
-
-        if let Some(handle) = stdout_handle {
-            let _ = handle.join();
+        // Read stderr fully so we can emit complete Python tracebacks on failure.
+        let mut collected_stderr = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut collected_stderr);
+            if !collected_stderr.trim().is_empty() {
+                app.emit(
+                    "agent-event",
+                    serde_json::json!({
+                        "type": "agent:status",
+                        "status": "error",
+                        "message": collected_stderr,
+                    }),
+                )
+                .ok();
+            }
         }
 
-        if let Some(handle) = stderr_handle {
+        if let Some(handle) = stdout_handle {
             let _ = handle.join();
         }
 
         match child.wait() {
             Ok(status) => {
                 if !status.success() {
+                    let msg = if !collected_stderr.trim().is_empty() {
+                        collected_stderr.clone()
+                    } else {
+                        format!("Agent planner exited with {}", status)
+                    };
                     app.emit(
                         "agent-event",
                         serde_json::json!({
                             "type": "agent:status",
                             "status": "error",
-                            "message": format!("Agent planner exited with {}", status),
+                            "message": msg,
                         }),
                     )
                     .ok();

@@ -21,7 +21,7 @@ import { PlotNode as PlotNodeView } from "./components/PlotNode";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { RouteInspector } from "./components/RouteInspector";
 import { createDefaultNode, defaultProject } from "./data/defaultProject";
-import { AIChatMessage, ActNode, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode, StructuredLore } from "./types/plot";
+import { AIChatMessage, ActNode, AgentMutationRecord, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode, StructuredLore } from "./types/plot";
 import { sanitizeNodeForAI } from "./utils/aiExport";
 import { getLayoutedElements } from "./utils/layout";
 
@@ -36,14 +36,12 @@ type AgentTask = {
   status: string;
 };
 
-type AgentMutationRecord = {
-  type: string;
-  action: string;
-  node?: Record<string, unknown>;
-  edge?: Record<string, unknown>;
-  node_id?: string;
-  data?: Record<string, unknown>;
-  warnings?: string[];
+type LoreContextItem = {
+  key: string;
+  kind: "Character" | "Location" | "Tag";
+  id: string;
+  label: string;
+  description: string;
 };
 
 const nodeTypes = {
@@ -246,6 +244,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [agentStatus, setAgentStatus] = useState<"idle" | "planning" | "executing" | "completed" | "error">("idle");
   const [agentStatusMessage, setAgentStatusMessage] = useState<string>("");
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
+  const [selectedLoreContext, setSelectedLoreContext] = useState<string[]>([]);
   const [stagedMutations, setStagedMutations] = useState<AgentMutationRecord[]>([]);
   const [isAwaitingApproval, setIsAwaitingApproval] = useState(false);
   const stagedMutationsRef = useRef<AgentMutationRecord[]>([]);
@@ -948,6 +947,49 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     [allNodes, selectedFlowNodeIds],
   );
 
+  const loreContextOptions = useMemo<LoreContextItem[]>(() => {
+    const titleize = (value: string) =>
+      value
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .split(" ")
+        .filter(Boolean)
+        .map((word) => word.slice(0, 1).toUpperCase() + word.slice(1))
+        .join(" ");
+
+    const characterOptions: LoreContextItem[] = (project.characters || []).map((character) => ({
+      key: `character:${character.id}`,
+      kind: "Character",
+      id: character.id,
+      label: `[Character] ${titleize(character.id)}`,
+      description: project.lore?.[character.id] || "",
+    }));
+
+    const locationOptions: LoreContextItem[] = (project.locations || []).map((location) => ({
+      key: `location:${location.id}`,
+      kind: "Location",
+      id: location.id,
+      label: `[Location] ${location.title || titleize(location.id)}`,
+      description: project.lore?.[location.id] || "",
+    }));
+
+    const tagOptions: LoreContextItem[] = (project.layerPresets || []).map((tag) => ({
+      key: `tag:${tag}`,
+      kind: "Tag",
+      id: tag,
+      label: `[Tag] ${titleize(tag)}`,
+      description: project.lore?.[tag] || "",
+    }));
+
+    return [...characterOptions, ...locationOptions, ...tagOptions];
+  }, [project.characters, project.layerPresets, project.locations, project.lore]);
+
+  const selectedLoreContextItems = useMemo(
+    () => loreContextOptions.filter((item) => selectedLoreContext.includes(item.key)),
+    [loreContextOptions, selectedLoreContext],
+  );
+
   const flowNodes = useMemo<FlowNode[]>(
     () =>
       allNodes
@@ -1059,7 +1101,12 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       return `✏️ Update Node: ${String(mutation.node_id ?? "unknown")}`;
     }
 
-    return `• ${mutation.action}`;
+    if (mutation.action === "ADD_LORE") {
+      const entityLabel = mutation.entityType === "character" ? "Character" : mutation.entityType === "location" ? "Location" : "Tag";
+      return `✨ Create ${entityLabel}: ${mutation.payload.name}`;
+    }
+
+    return `• Mutation`;
   };
 
   const allStagedWarnings = useMemo(
@@ -1075,11 +1122,40 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       if (mutation.action === "add_node" && mutation.node) applyAgentNodeMutation(mutation.node as Record<string, unknown>);
       if (mutation.action === "add_edge" && mutation.edge) applyAgentEdgeMutation(mutation.edge as Record<string, unknown>);
       if (mutation.action === "update_node" && typeof mutation.node_id === "string" && mutation.data) applyAgentUpdateMutation(String(mutation.node_id), mutation.data as Record<string, unknown>);
+      if (mutation.action === "ADD_LORE") {
+        const loreMutation = mutation as Extract<AgentMutationRecord, { action: "ADD_LORE" }>;
+        commitProject((previous) => {
+          const next = cloneProject(previous);
+          const { entityType, payload } = loreMutation;
+          const lore = { ...(next.lore || {}) };
+
+          lore[payload.id] = payload.description;
+
+          if (entityType === "character") {
+            if (!next.characters.some((character) => character.id === payload.id)) {
+              next.characters = [...next.characters, { id: payload.id, icon: "" }];
+            }
+          } else if (entityType === "location") {
+            if (!next.locations.some((location) => location.id === payload.id)) {
+              next.locations = [...next.locations, { id: payload.id, title: payload.name, preview: "" }];
+            }
+          } else if (!next.layerPresets.includes(payload.id)) {
+            next.layerPresets = [...next.layerPresets, payload.id];
+          }
+
+          next.lore = lore;
+          return next;
+        });
+      }
     });
     setStagedMutations([]);
     stagedMutationsRef.current = [];
     setIsAwaitingApproval(false);
     setStatus(`Applied ${staged.length} agent change(s)`);
+
+    setTimeout(() => {
+      void saveProject();
+    }, 0);
 
     if (hasAddedNodes) {
       // Auto-arrange only when the AI introduced new nodes, which is the common overlap case.
@@ -1905,14 +1981,21 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       return;
     }
 
+    setAgentStatus("idle");
+    setAgentStatusMessage("");
+
     const structuredPromptPackage = {
       nodes: selectedNodesForChat,
       globalStyle: project.globalStylePrompt.trim(),
       lore: project.lore || {},
+      projectPath,
       // Send a minimized representation to the agent to save tokens and
       // make name->id resolution deterministic: only id + name/title fields.
       characters: (project.characters || []).map((c) => ({ id: c.id, name: (c as any).name || (c as any).displayName || c.id })),
       locations: (project.locations || []).map((l) => ({ id: l.id, title: (l as any).title || l.id })),
+      llmProvider: project.llmProvider || "gemini",
+      localModelName: project.localModelName || "qwen2.5:0.5b",
+      selectedLoreContext: selectedLoreContextItems,
       userPrompt: prompt,
     };
 
@@ -1935,6 +2018,8 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     void invoke("run_agent_planner", {
       prompt,
       contextJson: JSON.stringify(structuredPromptPackage),
+    }).then(() => {
+      setSelectedLoreContext([]);
     }).catch((error) => {
       setAgentStatus("error");
       setAgentStatusMessage(`Failed to start planner: ${String(error)}`);
@@ -2237,10 +2322,35 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
           {leftPanelTab === "chat" ? (
             <div className="flex h-full min-h-0 flex-col rounded-xl border border-slate-700/70 bg-slate-950/60 p-3 overflow-hidden">
-              <div className="mb-3 flex items-center justify-between">
-                <div>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="flex-1">
                   <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">AI Co-pilot</h2>
                   <p className="mt-1 text-xs text-slate-500">Phase 4 workspace stub for guided generation.</p>
+                </div>
+                <div className="flex flex-col gap-2 items-end">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">LLM</label>
+                  <select
+                    className="rounded-md bg-slate-800 border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:border-slate-600 focus:outline-none focus:border-fuchsia-500"
+                    value={project.llmProvider || "gemini"}
+                    onChange={(e) => {
+                      const next = e.target.value as "gemini" | "ollama";
+                      commitProject((prev) => ({ ...prev, llmProvider: next }));
+                    }}
+                  >
+                    <option value="gemini">Cloud (Gemini)</option>
+                    <option value="ollama">Local (Ollama)</option>
+                  </select>
+                  {project.llmProvider === "ollama" ? (
+                    <input
+                      className="w-44 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-fuchsia-500"
+                      value={project.localModelName || "qwen2.5:0.5b"}
+                      placeholder="e.g., qwen2.5:0.5b"
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        commitProject((prev) => ({ ...prev, localModelName: next }));
+                      }}
+                    />
+                  ) : null}
                 </div>
               </div>
 
@@ -2331,8 +2441,22 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
               )}
 
               <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Agent Status</div>
-                <div className={`flex items-center gap-3 rounded-xl border px-3 py-2 text-sm ${
+                <div className="mb-2 flex items-center justify-between gap-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  <span>Agent Status</span>
+                  {agentStatus === "error" ? (
+                    <button
+                      type="button"
+                      className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[10px] text-rose-100 hover:bg-rose-500/20"
+                      onClick={() => {
+                        setAgentStatus("idle");
+                        setAgentStatusMessage("");
+                      }}
+                    >
+                      ✖ Dismiss
+                    </button>
+                  ) : null}
+                </div>
+                <div className={`flex items-start gap-3 rounded-xl border px-3 py-2 text-sm ${
                   agentStatus === "planning"
                     ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-100"
                     : agentStatus === "completed"
@@ -2354,7 +2478,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                   />
                   <div className="min-w-0">
                     <div className="font-semibold capitalize">{agentStatus}</div>
-                    <div className="truncate text-xs text-slate-400">{agentStatusMessage || "Idle"}</div>
+                    <div className="break-words whitespace-pre-wrap text-xs text-slate-400">{agentStatusMessage || "Idle"}</div>
                   </div>
                 </div>
               </div>
@@ -2412,6 +2536,34 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
               </div>
 
               <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
+                <div className="mb-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Lore Context</div>
+                  <select
+                    multiple
+                    value={selectedLoreContext}
+                    onChange={(event) => {
+                      const next = Array.from(event.currentTarget.selectedOptions, (option) => option.value);
+                      setSelectedLoreContext(next);
+                    }}
+                    className="h-36 w-full rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-200 outline-none transition-colors focus:border-fuchsia-500"
+                  >
+                    {loreContextOptions.length === 0 ? (
+                      <option value="" disabled>
+                        No lore entities available
+                      </option>
+                    ) : (
+                      loreContextOptions.map((item) => (
+                        <option key={item.key} value={item.key} className="bg-slate-950 text-slate-100">
+                          {item.label}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <div className="mt-2 text-[11px] text-slate-500">
+                    Hold Ctrl or Shift to select multiple lore items. Selected: {selectedLoreContextItems.length}
+                  </div>
+                </div>
+
                 <textarea
                   ref={aiChatInputRef}
                   className="max-h-[150px] min-h-[96px] w-full resize-none overflow-y-auto border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
@@ -3467,6 +3619,22 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
               </button>
             </div>
             <div className="p-4">
+              <div className="mb-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">LLM Provider</div>
+                <div className="text-sm">
+                  <select
+                    className="rounded-md bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-200"
+                    value={project.llmProvider || "gemini"}
+                    onChange={(e) => {
+                      const next = e.target.value as "gemini" | "ollama";
+                      commitProject((previous) => ({ ...previous, llmProvider: next }));
+                    }}
+                  >
+                    <option value="gemini">Cloud API (Gemini/OpenAI)</option>
+                    <option value="ollama">Local (Ollama)</option>
+                  </select>
+                </div>
+              </div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Global Style Directives</div>
               <textarea
                 ref={globalStylePromptRef}
