@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 import glob
@@ -16,11 +17,22 @@ client = genai.Client()
 
 
 def sanitize_filename(value: str) -> str:
+    """Sanitize a string for safe use as a filename on Windows and Unix."""
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(value))
     cleaned = re.sub(r"\s+", "_", cleaned)
     cleaned = re.sub(r"_+", "_", cleaned)
     cleaned = cleaned.strip("._ ")
     return cleaned[:120] if cleaned else "untitled"
+
+
+def sanitize_dirname(value: str) -> str:
+    """Sanitize a string for safe use as a directory name on Windows and Unix."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(value))
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    cleaned = cleaned.strip("._ ")
+    return cleaned[:80] if cleaned else "Untitled"
+
 
 PROMPT_TEMPLATE = """Ты — профессиональный сценарист визуальных новелл. Твоя задача: написать текст и диалоги для одной конкретной сцены строго по заданным правилам, не забегая вперед сюжета. Формат вывода: имя персонажа и его реплика/действие.
 
@@ -227,31 +239,50 @@ async def process_scene_node(
     bridge_summary: str,
     context: ActiveContext,
     export_dir: str,
-    global_style_prompt: str
-) -> str:
-    """Generate text for a Scene node."""
+    global_style_prompt: str,
+    current_act: str,
+    current_route: str,
+    scene_counter: int,
+) -> Tuple[str, int]:
+    """Generate text for a Scene node.
+    
+    Returns: (new_bridge_summary, updated_scene_counter)
+    """
     print(f"  [SCENE] Processing: {node.get('name', node_id)}")
     
     prompt = build_prompt(node, lore_db, bridge_summary, context, global_style_prompt)
     scene_text = await generate_text(prompt)
     
-    # Save output using a semantic, human-readable filename.
+    # Build nested output path: export_dir / Generated / <Act> / <Route> /
+    act_dir = sanitize_dirname(current_act)
+    route_dir = sanitize_dirname(current_route)
+    output_dir = os.path.join(export_dir, "Generated", act_dir, route_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Build sequentially numbered filename: 001_SceneName.txt
     display_name = node.get("name") or node.get("parameters", {}).get("title") or node_id
-    semantic_name = sanitize_filename(f"{node.get('type', 'Scene')}_{display_name}")
-    output_path = os.path.join(export_dir, f"{semantic_name}_output.txt")
+    safe_name = sanitize_filename(display_name)
+    numbered_name = f"{scene_counter:03d}_{safe_name}.txt"
+    output_path = os.path.join(output_dir, numbered_name)
+    
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(scene_text)
     
+    print(f"    -> Saved to: {os.path.relpath(output_path, export_dir)}")
+    
     new_bridge = await generate_bridge(scene_text)
     print(f"    -> Generated bridge: {new_bridge[:60]}...")
-    return new_bridge
+    return new_bridge, scene_counter + 1
 
 def process_act_node(
     node_id: str,
     node: Dict[str, Any],
     context: ActiveContext
-) -> None:
-    """Process an Act node by storing its overrides in active context."""
+) -> str:
+    """Process an Act node by storing its overrides in active context.
+    
+    Returns the sanitized act title for use as a directory name.
+    """
     print(f"  [ACT] Processing: {node.get('name', node_id)}")
     
     params = node.get("parameters", {})
@@ -260,6 +291,10 @@ def process_act_node(
     for override in overrides:
         context.apply_override(override)
         print(f"    -> Applied override: {override.get('property')} for {override.get('targetId')}")
+    
+    # Return the act's title for directory naming
+    act_title = params.get("title") or node.get("name") or node_id
+    return act_title
 
 async def dfs_execute(
     node_id: str,
@@ -270,22 +305,25 @@ async def dfs_execute(
     export_dir: str,
     global_style_prompt: str,
     depth: int = 0,
-    branch_name: str = "main"
-) -> Tuple[str, int]:
+    branch_name: str = "main",
+    current_act: str = "Uncategorized_Act",
+    current_route: str = "Main_Route",
+    scene_counter: int = 1,
+) -> Tuple[str, int, int]:
     """
     Execute DFS traversal through the narrative graph.
-    Returns: (final_bridge_summary, scene_count)
+    Returns: (final_bridge_summary, scenes_generated_in_subtree, updated_scene_counter)
     """
     indent = "  " * depth
     
     if node_id in context.visited_nodes:
         print(f"{indent}[VISITED] Already processed {node_id}, skipping")
-        return bridge_summary, 0
+        return bridge_summary, 0, scene_counter
     
     node = nodes.get(node_id)
     if not node:
         print(f"{indent}[ERROR] Node {node_id} not found")
-        return bridge_summary, 0
+        return bridge_summary, 0, scene_counter
     
     context.visited_nodes.add(node_id)
     node_type = node.get("type")
@@ -295,31 +333,49 @@ async def dfs_execute(
     print(f"__PLOT_NODE_ACTIVE__:{node_id}", flush=True)
     
     if node_type == "Act":
-        # Process Act: store overrides in context
-        process_act_node(node_id, node, context)
+        # Process Act: store overrides in context, update current_act
+        act_title = process_act_node(node_id, node, context)
+        next_act = act_title
+        
         # Continue to next node
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]  # Act nodes typically have one outgoing
-            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
+            return await dfs_execute(
+                next_id, nodes, lore_db, bridge_summary, context,
+                export_dir, global_style_prompt, depth + 1, branch_name,
+                current_act=next_act,
+                current_route=current_route,
+                scene_counter=scene_counter,
+            )
         else:
             print(f"{indent}[ACT] No outgoing connections, ending this path")
-            return bridge_summary, 0
+            return bridge_summary, 0, scene_counter
     
     elif node_type == "Scene":
-        # Process Scene: generate text
-        bridge_summary = await process_scene_node(node_id, node, lore_db, bridge_summary, context, export_dir, global_style_prompt)
+        # Process Scene: generate text with nested directory path
+        bridge_summary, scene_counter = await process_scene_node(
+            node_id, node, lore_db, bridge_summary, context,
+            export_dir, global_style_prompt,
+            current_act, current_route, scene_counter,
+        )
         scenes_generated = 1
         
         # Continue to next node
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]
-            next_bridge, next_scenes = await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
-            return next_bridge, scenes_generated + next_scenes
+            next_bridge, next_scenes, scene_counter = await dfs_execute(
+                next_id, nodes, lore_db, bridge_summary, context,
+                export_dir, global_style_prompt, depth + 1, branch_name,
+                current_act=current_act,
+                current_route=current_route,
+                scene_counter=scene_counter,
+            )
+            return next_bridge, scenes_generated + next_scenes, scene_counter
         else:
             print(f"{indent}[SCENE] No outgoing connections, ending this path")
-            return bridge_summary, scenes_generated
+            return bridge_summary, scenes_generated, scene_counter
     
     elif node_type == "BranchPoint":
         # Process BranchPoint: spawn parallel paths for each choice
@@ -329,7 +385,7 @@ async def dfs_execute(
         
         if not choices:
             print(f"{indent}[BRANCH] No choices defined, ending this path")
-            return bridge_summary, 0
+            return bridge_summary, 0, scene_counter
         
         # Append branch context to bridge for next scene
         choice_context = "Игрок выбрал："
@@ -353,15 +409,19 @@ async def dfs_execute(
             print(f"{indent}  [CHOICE] '{choice_text}' -> {next_node_id}")
             
             # Recursive DFS for this choice branch
-            result_bridge, result_scenes = await dfs_execute(
+            result_bridge, result_scenes, scene_counter = await dfs_execute(
                 next_node_id,
                 nodes,
                 lore_db,
                 choice_bridge,
                 context,
                 export_dir,
+                global_style_prompt,
                 depth + 1,
-                branch_label
+                branch_label,
+                current_act=current_act,
+                current_route=current_route,
+                scene_counter=scene_counter,
             )
             
             all_results.append((choice_text, result_bridge, result_scenes))
@@ -371,19 +431,29 @@ async def dfs_execute(
         if all_results:
             final_bridge = all_results[-1][1]
             print(f"{indent}[BRANCH] Completed with {total_scenes} scenes generated")
-            return final_bridge, total_scenes
+            return final_bridge, total_scenes, scene_counter
         else:
-            return bridge_summary, 0
+            return bridge_summary, 0, scene_counter
     
     elif node_type == "Route":
-        # Route nodes: pass through (not story-relevant)
-        print(f"  [ROUTE] Passing through: {node.get('name', node_id)}")
+        # Route nodes: update current_route and pass through
+        params = node.get("parameters", {})
+        route_title = params.get("title") or node.get("name") or node_id
+        next_route = route_title
+        print(f"  [ROUTE] Entering route: {next_route}")
+        
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]
-            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
+            return await dfs_execute(
+                next_id, nodes, lore_db, bridge_summary, context,
+                export_dir, global_style_prompt, depth + 1, branch_name,
+                current_act=current_act,
+                current_route=next_route,
+                scene_counter=scene_counter,
+            )
         else:
-            return bridge_summary, 0
+            return bridge_summary, 0, scene_counter
     
     elif node_type == "Event":
         # Event nodes: pass through
@@ -391,13 +461,66 @@ async def dfs_execute(
         next_nodes = node.get("connectedTo", [])
         if next_nodes:
             next_id = next_nodes[0]
-            return await dfs_execute(next_id, nodes, lore_db, bridge_summary, context, export_dir, global_style_prompt, depth + 1, branch_name)
+            return await dfs_execute(
+                next_id, nodes, lore_db, bridge_summary, context,
+                export_dir, global_style_prompt, depth + 1, branch_name,
+                current_act=current_act,
+                current_route=current_route,
+                scene_counter=scene_counter,
+            )
         else:
-            return bridge_summary, 0
+            return bridge_summary, 0, scene_counter
     
     else:
         print(f"{indent}[UNKNOWN] Node type '{node_type}' not handled")
-        return bridge_summary, 0
+        return bridge_summary, 0, scene_counter
+
+
+def export_lore(export_dir: str, lore_db: Dict[str, str], nodes: Dict[str, Dict[str, Any]]) -> None:
+    """Export all lore data into a structured Lore/ subdirectory in the Generated output."""
+    lore_export_dir = os.path.join(export_dir, "Generated", "Lore")
+    os.makedirs(lore_export_dir, exist_ok=True)
+
+    # ── Characters ──
+    characters_dir = os.path.join(lore_export_dir, "Characters")
+    os.makedirs(characters_dir, exist_ok=True)
+    char_count = 0
+    for entity_id, content in lore_db.items():
+        # Heuristic: character IDs typically start with "char_" or match
+        # node-adjacent naming. Export all lore entries that aren't obviously
+        # locations or tags as character files, and separately handle those.
+        # Since lore_db is a flat id->text map, we just export everything.
+        safe_id = sanitize_filename(entity_id)
+        filepath = os.path.join(characters_dir, f"{safe_id}.md")
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(f"# {entity_id}\n\n{content}\n")
+        char_count += 1
+
+    # ── Node summary index ──
+    index_entries: List[str] = []
+    for node_id, node in sorted(nodes.items(), key=lambda x: x[0]):
+        node_type = node.get("type", "Unknown")
+        name = node.get("name") or node.get("parameters", {}).get("title", node_id)
+        index_entries.append(f"- **{node_type}** `{node_id}`: {name}")
+
+    index_path = os.path.join(lore_export_dir, "node_index.md")
+    with open(index_path, 'w', encoding='utf-8') as f:
+        f.write("# Node Index\n\n")
+        f.write(f"Total nodes: {len(nodes)}\n\n")
+        f.write("\n".join(index_entries) + "\n")
+
+    # ── Summary JSON ──
+    summary = {
+        "lore_entries": len(lore_db),
+        "total_nodes": len(nodes),
+        "entity_ids": sorted(lore_db.keys()),
+    }
+    summary_path = os.path.join(lore_export_dir, "lore_summary.json")
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    print(f"  [LORE EXPORT] Exported {char_count} lore entries + node index to Generated/Lore/")
+
 
 async def run_dfs(export_dir: str):
     
@@ -412,6 +535,9 @@ async def run_dfs(export_dir: str):
     
     print(f"  Loaded {len(nodes)} nodes")
     print(f"  Loaded {len(lore_db)} lore entries")
+    
+    # ── Objective 4: Export Lore before generation ──
+    export_lore(export_dir, lore_db, nodes)
     
     # Find starting node
     start_node_id = find_start_node(nodes)
@@ -434,8 +560,8 @@ async def run_dfs(export_dir: str):
         except Exception as e:
             print(f"[WARN] Could not read progress state: {e}")
     
-    # Execute DFS from start node
-    final_bridge, total_scenes = await dfs_execute(
+    # Execute DFS from start node with narrative state tracking
+    final_bridge, total_scenes, _ = await dfs_execute(
         start_node_id,
         nodes,
         lore_db,
@@ -444,7 +570,10 @@ async def run_dfs(export_dir: str):
         export_dir,
         global_style_prompt,
         depth=0,
-        branch_name="main"
+        branch_name="main",
+        current_act="Uncategorized_Act",
+        current_route="Main_Route",
+        scene_counter=1,
     )
     
     # Update progress state

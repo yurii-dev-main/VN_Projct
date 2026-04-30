@@ -333,6 +333,33 @@ fn run_agent_planner(app: tauri::AppHandle, prompt: String, context_json: String
     Ok("Started".to_string())
 }
 
+#[tauri::command]
+async fn run_lore_parser(draft_text: String, entity_type: String) -> Result<String, String> {
+    let output = std::process::Command::new("python")
+        .current_dir("../pipeline")
+        .arg("parser.py")
+        .arg("--draft")
+        .arg(&draft_text)
+        .arg("--entity-type")
+        .arg(&entity_type)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to start lore parser: {}", e))?;
+
+    if !output.status.success() {
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Lore parser failed (exit {}): {}", output.status, stderr_text));
+    }
+
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout_text.trim().is_empty() {
+        return Err("Lore parser returned empty output.".to_string());
+    }
+
+    Ok(stdout_text.trim().to_string())
+}
+
 // ─────────────────────────────────────────────
 //  Internal helpers
 // ─────────────────────────────────────────────
@@ -368,7 +395,8 @@ pub fn run() {
             export_project_json,
             export_modular_project,
             run_ai_pipeline,
-            run_agent_planner
+            run_agent_planner,
+            run_lore_parser
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

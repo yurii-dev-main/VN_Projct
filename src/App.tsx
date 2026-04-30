@@ -247,6 +247,8 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [selectedLoreContext, setSelectedLoreContext] = useState<string[]>([]);
   const [stagedMutations, setStagedMutations] = useState<AgentMutationRecord[]>([]);
   const [isAwaitingApproval, setIsAwaitingApproval] = useState(false);
+  const [isLorePopoverOpen, setIsLorePopoverOpen] = useState(false);
+  const lorePopoverRef = useRef<HTMLDivElement | null>(null);
   const stagedMutationsRef = useRef<AgentMutationRecord[]>([]);
   const [lastSavedPath, setLastSavedPath] = useState<string>(() => {
     const stored = localStorage.getItem("plot-architect:lastSavedPath") || "";
@@ -2536,37 +2538,89 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
               </div>
 
               <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
-                <div className="mb-3">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Lore Context</div>
-                  <select
-                    multiple
-                    value={selectedLoreContext}
-                    onChange={(event) => {
-                      const next = Array.from(event.currentTarget.selectedOptions, (option) => option.value);
-                      setSelectedLoreContext(next);
-                    }}
-                    className="h-36 w-full rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-200 outline-none transition-colors focus:border-fuchsia-500"
-                  >
-                    {loreContextOptions.length === 0 ? (
-                      <option value="" disabled>
-                        No lore entities available
-                      </option>
-                    ) : (
-                      loreContextOptions.map((item) => (
-                        <option key={item.key} value={item.key} className="bg-slate-950 text-slate-100">
-                          {item.label}
-                        </option>
-                      ))
+                <div className="relative">
+                  {/* ── Floating Lore Context Popover ───────────── */}
+                  {isLorePopoverOpen && (
+                    <div
+                      ref={lorePopoverRef}
+                      className="absolute bottom-full mb-2 right-0 left-0 z-50 rounded-xl border border-slate-600/80 bg-slate-900/95 shadow-2xl shadow-black/40 backdrop-blur-sm"
+                      style={{ maxHeight: "220px" }}
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-700/70 px-3 py-2">
+                        <span className="text-xs font-semibold uppercase tracking-wider text-fuchsia-300">Lore Context</span>
+                        <button
+                          type="button"
+                          className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                          onMouseDown={(e) => { e.preventDefault(); setIsLorePopoverOpen(false); }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="overflow-y-auto px-1 py-1" style={{ maxHeight: "176px" }}>
+                        {loreContextOptions.length === 0 ? (
+                          <div className="px-3 py-3 text-xs text-slate-500 italic">No lore entities available. Add characters, locations, or tags in the Lore Editor.</div>
+                        ) : (
+                          loreContextOptions.map((item) => {
+                            const isChecked = selectedLoreContext.includes(item.key);
+                            return (
+                              <label
+                                key={item.key}
+                                className={`flex cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors ${
+                                  isChecked
+                                    ? "bg-fuchsia-500/15 text-fuchsia-200"
+                                    : "text-slate-300 hover:bg-slate-800/60"
+                                }`}
+                                onMouseDown={(e) => e.preventDefault()}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="accent-fuchsia-500"
+                                  checked={isChecked}
+                                  onChange={() => {
+                                    setSelectedLoreContext((prev) =>
+                                      isChecked ? prev.filter((k) => k !== item.key) : [...prev, item.key],
+                                    );
+                                  }}
+                                />
+                                <span>{item.label}</span>
+                              </label>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── Lore toggle button + selected count ─────── */}
+                  <div className="mb-2 flex items-center justify-between">
+                    <button
+                      type="button"
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors ${
+                        selectedLoreContextItems.length > 0
+                          ? "border-fuchsia-400/40 bg-fuchsia-500/10 text-fuchsia-200 hover:bg-fuchsia-500/20"
+                          : "border-slate-700 bg-slate-800/60 text-slate-400 hover:bg-slate-700/80 hover:text-slate-200"
+                      }`}
+                      onClick={() => setIsLorePopoverOpen((prev) => !prev)}
+                    >
+                      <span>📖</span>
+                      <span>Lore{selectedLoreContextItems.length > 0 ? ` (${selectedLoreContextItems.length})` : ""}</span>
+                      <span className="text-[10px]">{isLorePopoverOpen ? "▲" : "▼"}</span>
+                    </button>
+                    {selectedLoreContextItems.length > 0 && (
+                      <button
+                        type="button"
+                        className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                        onClick={() => setSelectedLoreContext([])}
+                      >
+                        Clear
+                      </button>
                     )}
-                  </select>
-                  <div className="mt-2 text-[11px] text-slate-500">
-                    Hold Ctrl or Shift to select multiple lore items. Selected: {selectedLoreContextItems.length}
                   </div>
                 </div>
 
                 <textarea
                   ref={aiChatInputRef}
-                  className="max-h-[150px] min-h-[96px] w-full resize-none overflow-y-auto border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
+                  className="max-h-[150px] min-h-[80px] w-full resize-none overflow-y-auto border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
                   placeholder="Ask the AI Co-pilot to draft, revise, or branch the story..."
                   value={aiChatDraft}
                   onInput={(event) => {
@@ -2576,11 +2630,24 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                   }}
                   onChange={(event) => setAiChatDraft(event.target.value)}
                 />
-                <div className="mt-3 flex justify-end">
+                <div className="mt-3 flex items-center justify-between">
+                  {selectedLoreContextItems.length > 0 && (
+                    <div className="flex flex-wrap gap-1 max-w-[65%]">
+                      {selectedLoreContextItems.slice(0, 3).map((item) => (
+                        <span key={item.key} className="inline-flex items-center rounded-full bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 text-[10px] text-fuchsia-300">
+                          {item.kind === "Character" ? "👤" : item.kind === "Location" ? "📍" : "🏷️"} {item.id}
+                        </span>
+                      ))}
+                      {selectedLoreContextItems.length > 3 && (
+                        <span className="text-[10px] text-slate-500">+{selectedLoreContextItems.length - 3} more</span>
+                      )}
+                    </div>
+                  )}
                   <button
                     type="button"
-                    className="rounded-md bg-fuchsia-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-fuchsia-500"
+                    className="ml-auto rounded-md bg-fuchsia-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-fuchsia-500"
                     onClick={() => {
+                        setIsLorePopoverOpen(false);
                         handleAiChatSend();
                     }}
                   >
