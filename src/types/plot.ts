@@ -129,6 +129,8 @@ export type PlotProject = {
   globalFlags: string[];
   layerPresets: string[];
   lore?: Record<string, string>;
+  llmProvider?: 'gemini' | 'ollama';
+  localModelName?: string;
 };
 
 export type AIChatMessage = {
@@ -136,3 +138,43 @@ export type AIChatMessage = {
   role: "assistant" | "user" | "system";
   content: string;
 };
+
+export type AgentMutationRecord =
+  | {
+      type: string;
+      action: "add_node";
+      node: Record<string, unknown>;
+      node_id?: string;
+      edge?: { id?: string };
+      data?: Record<string, unknown>;
+      warnings?: string[];
+    }
+  | {
+      type: string;
+      action: "add_edge";
+      edge: Record<string, unknown>;
+      node_id?: string;
+      data?: Record<string, unknown>;
+      warnings?: string[];
+    }
+  | {
+      type: string;
+      action: "update_node";
+      node_id: string;
+      edge?: { id?: string };
+      data: Record<string, unknown>;
+      warnings?: string[];
+    }
+  | {
+      type: string;
+      action: "ADD_LORE";
+      entityType: "character" | "location" | "tag";
+      node_id?: string;
+      edge?: { id?: string };
+      payload: {
+        id: string;
+        name: string;
+        description: string;
+      };
+      warnings?: string[];
+    };
