@@ -108,7 +108,14 @@ def build_lore_rules_block() -> str:
         "2. Before creating or referencing an entity, review the [USER PROVIDED LORE CONTEXT] if present.\n"
         "3. If the entity is not in the provided context, you MUST use the get_lore_directory tool to search for existing Lore entities.\n"
         "4. When populating nodes, ONLY use the specific id of the Character, Location, or Tag from the Lore directory.\n"
-        "5. If you need to use a character/location/tag that does NOT exist in the lore directory, you MUST first call propose_lore_entity to create it. Use the ID returned by that tool when creating graph nodes in the same plan."
+        "5. If you need to use a character/location/tag that does NOT exist in the lore directory, you MUST first call propose_lore_entity to create it. Use the ID returned by that tool when creating graph nodes in the same plan.\n"
+        "6. ALL lore entity names and IDs MUST be in English. If the user prompts in another language, transliterate or translate the name to English for the `name` and `id` fields. Descriptions may be in any language.\n"
+        "7. When using update_node, DO NOT modify actingCharacters or locationId unless the user EXPLICITLY asks to add or remove a specific entity. If you must provide them, use ONLY exact IDs from get_lore_directory. NEVER invent, guess, or hallucinate character/location IDs.\n"
+        "\n"
+        "NODE ARCHITECTURE RULES:\n"
+        "8. SCENE nodes contain ONLY a single narrative text block (narrativeAction, tone, goal, constraints). They do NOT have choices, dialogue variants, or branching. A Scene always flows to exactly one next node.\n"
+        "9. If you need to present a player choice, you MUST create a BRANCHPOINT node. Only BranchPoint nodes have the `choices` field.\n"
+        "10. Do NOT use the `dialogue_text` field. Write all narrative content in the `narrative_action` field instead."
     )
 
 
@@ -259,21 +266,24 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     },
     {
         "name": "update_node",
-        "description": "Fill or update an existing node with narrative content, dialogue, or choices.",
+        "description": "Update an existing node with narrative content. For Scene nodes: set narrative_action, tone, goal, constraints. For BranchPoint nodes: set choices. Do NOT set actingCharacters or locationId unless the user explicitly requested it.",
         "parameters": {
             "type": "object",
             "properties": {
-                "node_id": {"type": "string"},
-                "narrative_action": {"type": "string"},
-                "tone": {"type": "string"},
-                "goal": {"type": "string"},
-                "constraints": {"type": "string"},
-                "dialogue_text": {"type": "string"},
+                "node_id": {"type": "string", "description": "The ID of the node to update."},
+                "narrative_action": {"type": "string", "description": "The main narrative text for Scene nodes. Write all scene content here."},
+                "tone": {"type": "string", "description": "Tone and mood for Scene nodes."},
+                "goal": {"type": "string", "description": "What the scene should accomplish."},
+                "constraints": {"type": "string", "description": "Hard constraints for the scene."},
                 "actingCharacters": {
                     "type": "array",
                     "items": {"type": "string"},
+                    "description": "ONLY provide if the user explicitly asked to set characters. Use exact lore IDs.",
                 },
-                "locationId": {"type": "string"},
+                "locationId": {
+                    "type": "string",
+                    "description": "ONLY provide if the user explicitly asked to set a location. Use exact lore ID.",
+                },
                 "choices": {
                     "type": "array",
                     "items": {
@@ -281,6 +291,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         "properties": {"id": {"type": "string"}, "text": {"type": "string"}},
                         "required": ["id", "text"],
                     },
+                    "description": "ONLY for BranchPoint nodes. Scene nodes MUST NOT have choices.",
                 },
             },
             "required": ["node_id"],
@@ -303,7 +314,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     },
     {
         "name": "propose_lore_entity",
-        "description": "Propose a new lore entity for approval without writing directly to the project JSON.",
+        "description": "Propose a new lore entity for approval. CRITICAL: The `name` field MUST be in English. If the user's prompt is in another language, transliterate or translate the name to English. Descriptions may remain in the user's language.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -311,8 +322,8 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                     "type": "string",
                     "enum": ["character", "location", "tag"],
                 },
-                "name": {"type": "string"},
-                "description": {"type": "string"},
+                "name": {"type": "string", "description": "Entity name in English only."},
+                "description": {"type": "string", "description": "Description of the entity. May be in any language."},
             },
             "required": ["entity_type", "name", "description"],
             "additionalProperties": False,
@@ -397,6 +408,8 @@ def build_prompt(user_prompt: str, context_json: str) -> str:
         "No markdown, no code fences, no commentary.",
         "Keep task descriptions concise, actionable, and sequential.",
         "When creating a story branch, first use create_node, then use connect_nodes, and finally use update_node to fill the newly created nodes with rich narrative text, tone, and character dialogue based on the user's prompt.",
+        "IMPORTANT: Scene nodes hold ONLY a single narrative block — no choices, no dialogue variants. If the story requires a player choice, plan a BranchPoint node instead.",
+        "IMPORTANT: All lore entity names and IDs must be in English. Transliterate if the user prompts in another language.",
         lore_rules,
     ]
 
@@ -490,6 +503,13 @@ def build_executor_prompt(
         "You are provided with a `lore` dictionary containing characters and locations (ids -> content). When using the `update_node` tool, for `actingCharacters` and `locationId`, you MUST use the exact string id from the provided lore, NEVER the character's or location's name. If a requested character or location is not present in the lore, do not include it.",
         "When creating a story branch, first use create_node, then use connect_nodes, and finally use update_node to fill the newly created nodes with rich narrative text, tone, and character dialogue.",
         "Do not modify files. Emit STRICT JSON only. Available tools are create_node, connect_nodes, update_node, get_lore_directory and propose_lore_entity.",
+        "",
+        "CRITICAL NODE ARCHITECTURE RULES:",
+        "- SCENE nodes contain ONLY a single narrative block. Use `narrative_action` for all Scene text. Scenes do NOT have choices, dialogue variants, or multiple outputs. NEVER put `choices` or `dialogue_text` on a Scene node.",
+        "- BRANCHPOINT nodes are the ONLY nodes that can have `choices`. If the story needs a player decision, create a BranchPoint.",
+        "- When using update_node, do NOT set `actingCharacters` or `locationId` unless the user EXPLICITLY asked to change them. Omitting these fields preserves the existing data.",
+        "- All lore entity names MUST be in English. Transliterate if needed.",
+        "",
         "Return one of these shapes exactly:",
         '{"type":"tool_call","name":"create_node","arguments":{...}}',
         '{"type":"tool_call","name":"connect_nodes","arguments":{...}}',
@@ -700,10 +720,10 @@ def execute_plan(user_prompt: str, context_json: str, tasks: List[Dict[str, Any]
                     data["goal"] = str(arguments.get("goal"))
                 if "constraints" in arguments and arguments.get("constraints") is not None:
                     data["constraints"] = str(arguments.get("constraints"))
-                if "dialogue_text" in arguments and arguments.get("dialogue_text") is not None:
-                    data["dialogue_text"] = str(arguments.get("dialogue_text"))
+                # dialogue_text is deprecated — ignore it silently
                 if "choices" in arguments and isinstance(arguments.get("choices"), list):
-                    # Pass choices through as-is (list of {id,text})
+                    # choices are ONLY valid for BranchPoint nodes;
+                    # the frontend's applyAgentUpdateMutation already enforces this
                     data["choices"] = arguments.get("choices")
                 # Accept actingCharacters and locationId if provided — resolve names to lore IDs when possible
                 context = execution_state.get("selected_context") if isinstance(execution_state.get("selected_context"), dict) else {}

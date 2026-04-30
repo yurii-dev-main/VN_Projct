@@ -586,17 +586,9 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
           return;
         }
         if (key === "dialogue_text" || key === "dialogueText") {
-          // Append a dialogue variant if the node is a Scene
-          if (next.type === "Scene") {
-            const scene = next as SceneNode;
-            const variant: DialogueVariant = {
-              id: `var_${Math.random().toString(36).slice(2, 6)}`,
-              text: String(value),
-              effects: [],
-              nextNode: "",
-            };
-            nextParameters["dialogueVariants"] = [...(scene.parameters.dialogueVariants || []), variant];
-          }
+          // DEPRECATED: dialogue_text is no longer used. Narrative content
+          // should go into narrativeAction. Silently ignore to prevent
+          // accidental dialogueVariant creation on Scene nodes.
           return;
         }
         if (key === "choices" && Array.isArray(value)) {
@@ -2442,88 +2434,112 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                 </div>
               )}
 
-              <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
-                <div className="mb-2 flex items-center justify-between gap-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  <span>Agent Status</span>
-                  {agentStatus === "error" ? (
-                    <button
-                      type="button"
-                      className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[10px] text-rose-100 hover:bg-rose-500/20"
-                      onClick={() => {
-                        setAgentStatus("idle");
-                        setAgentStatusMessage("");
-                      }}
-                    >
-                      ✖ Dismiss
-                    </button>
-                  ) : null}
-                </div>
-                <div className={`flex items-start gap-3 rounded-xl border px-3 py-2 text-sm ${
-                  agentStatus === "planning"
-                    ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-100"
-                    : agentStatus === "completed"
-                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
-                      : agentStatus === "error"
-                        ? "border-rose-500/30 bg-rose-500/10 text-rose-100"
-                        : "border-slate-700 bg-slate-900/70 text-slate-300"
-                }`}>
-                  <div
-                    className={`h-2.5 w-2.5 rounded-full ${
-                      agentStatus === "planning"
-                        ? "animate-pulse bg-fuchsia-400 shadow-[0_0_18px_rgba(217,70,239,0.8)]"
-                        : agentStatus === "completed"
-                          ? "bg-emerald-400"
-                          : agentStatus === "error"
-                            ? "bg-rose-400"
-                            : "bg-slate-500"
-                    }`}
-                  />
-                  <div className="min-w-0">
-                    <div className="font-semibold capitalize">{agentStatus}</div>
-                    <div className="break-words whitespace-pre-wrap text-xs text-slate-400">{agentStatusMessage || "Idle"}</div>
+              {/* ── Agent Status (collapsible, auto-expand when active) ── */}
+              <details
+                className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 group"
+                open={agentStatus !== "idle"}
+              >
+                <summary className="flex cursor-pointer select-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-200 transition-colors list-none [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`h-2 w-2 rounded-full ${
+                        agentStatus === "planning" || agentStatus === "executing"
+                          ? "animate-pulse bg-fuchsia-400 shadow-[0_0_12px_rgba(217,70,239,0.7)]"
+                          : agentStatus === "completed"
+                            ? "bg-emerald-400"
+                            : agentStatus === "error"
+                              ? "bg-rose-400"
+                              : "bg-slate-500"
+                      }`}
+                    />
+                    <span>Agent Status</span>
+                    <span className="capitalize font-normal text-[10px] text-slate-500">({agentStatus})</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {agentStatus === "error" ? (
+                      <button
+                        type="button"
+                        className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/20"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setAgentStatus("idle");
+                          setAgentStatusMessage("");
+                        }}
+                      >
+                        ✖ Dismiss
+                      </button>
+                    ) : null}
+                    <span className="text-[10px] text-slate-600 group-open:rotate-180 transition-transform">▼</span>
+                  </div>
+                </summary>
+                <div className="px-3 pb-3">
+                  <div className={`flex items-start gap-3 rounded-xl border px-3 py-2 text-sm ${
+                    agentStatus === "planning" || agentStatus === "executing"
+                      ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-100"
+                      : agentStatus === "completed"
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                        : agentStatus === "error"
+                          ? "border-rose-500/30 bg-rose-500/10 text-rose-100"
+                          : "border-slate-700 bg-slate-900/70 text-slate-300"
+                  }`}>
+                    <div className="min-w-0">
+                      <div className="font-semibold capitalize">{agentStatus}</div>
+                      <div className="break-words whitespace-pre-wrap text-xs text-slate-400 max-h-[100px] overflow-y-auto">{agentStatusMessage || "Idle"}</div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </details>
 
-              <div className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">TODO List</div>
-                  <div className="text-[11px] text-slate-500">Planner output</div>
-                </div>
-                <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2">
-                  {agentTasks.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-700/80 bg-slate-900/40 px-3 py-4 text-sm text-slate-500">
-                      No tasks yet. Send a request to generate an agent plan.
-                    </div>
-                  ) : (
-                    agentTasks.map((task) => (
-                      <div
-                        key={task.id}
-                        className="flex items-start gap-3 rounded-xl border border-slate-700/80 bg-slate-900/70 px-3 py-3 shadow-sm shadow-slate-950/30"
-                      >
-                        <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-500 text-[10px] text-slate-400">
-                          {task.status === "pending" ? "○" : "✓"}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Task {task.id}</span>
-                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
-                              task.status === "pending"
-                                ? "bg-slate-800 text-slate-400"
-                                : task.status === "done"
-                                  ? "bg-emerald-500/15 text-emerald-300"
-                                  : "bg-fuchsia-500/15 text-fuchsia-300"
-                            }`}>
-                              {task.status}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-sm leading-relaxed text-slate-200 break-words whitespace-pre-wrap">{task.desc}</p>
-                        </div>
+              {/* ── TODO List (collapsible, auto-expand when tasks exist + active) ── */}
+              <details
+                className="mt-3 shrink-0 rounded-2xl border border-slate-700/70 bg-slate-950/80 group"
+                open={agentTasks.length > 0 && agentStatus !== "idle"}
+              >
+                <summary className="flex cursor-pointer select-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-200 transition-colors list-none [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-center gap-2">
+                    <span>TODO List</span>
+                    {agentTasks.length > 0 && (
+                      <span className="rounded-full bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">{agentTasks.length}</span>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-slate-600 group-open:rotate-180 transition-transform">▼</span>
+                </summary>
+                <div className="px-3 pb-3">
+                  <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
+                    {agentTasks.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-slate-700/80 bg-slate-900/40 px-3 py-3 text-xs text-slate-500">
+                        No tasks yet. Send a request to generate an agent plan.
                       </div>
-                    ))
-                  )}
+                    ) : (
+                      agentTasks.map((task) => (
+                        <div
+                          key={task.id}
+                          className="flex items-start gap-2 rounded-lg border border-slate-700/80 bg-slate-900/70 px-2.5 py-2 text-xs"
+                        >
+                          <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-slate-500 text-[9px] text-slate-400">
+                            {task.status === "pending" ? "○" : "✓"}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">#{task.id}</span>
+                              <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
+                                task.status === "pending"
+                                  ? "bg-slate-800 text-slate-400"
+                                  : task.status === "done" || task.status === "completed"
+                                    ? "bg-emerald-500/15 text-emerald-300"
+                                    : "bg-fuchsia-500/15 text-fuchsia-300"
+                              }`}>
+                                {task.status}
+                              </span>
+                            </div>
+                            <p className="mt-0.5 text-xs leading-relaxed text-slate-200 break-words">{task.desc}</p>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
-              </div>
+              </details>
 
               <div className="mt-3 shrink-0 flex items-center justify-between">
                 <div
