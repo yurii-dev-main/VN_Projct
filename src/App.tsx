@@ -21,7 +21,7 @@ import { PlotNode as PlotNodeView } from "./components/PlotNode";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { RouteInspector } from "./components/RouteInspector";
 import { createDefaultNode, defaultProject } from "./data/defaultProject";
-import { AIChatMessage, ActNode, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode } from "./types/plot";
+import { AIChatMessage, ActNode, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode, StructuredLore } from "./types/plot";
 import { sanitizeNodeForAI } from "./utils/aiExport";
 import { getLayoutedElements } from "./utils/layout";
 
@@ -72,6 +72,8 @@ const normalizeProject = (project: Partial<PlotProject>): PlotProject => ({
   globalFlags: project.globalFlags ?? defaultProjectSnapshot.globalFlags,
   layerPresets: project.layerPresets ?? defaultProjectSnapshot.layerPresets,
   lore: project.lore ?? defaultProjectSnapshot.lore,
+  loreStructured: project.loreStructured ?? {},
+  tags: project.tags ?? {},
 });
 const getPrimaryLayer = (node: PlotNode): string => node.layerTags[0] ?? "ungrouped";
 const equalStringArrays = (left: string[], right: string[]): boolean =>
@@ -219,6 +221,9 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [activeView, setActiveView] = useState<"graph" | "lore">("graph");
   const [selectedLoreId, setSelectedLoreId] = useState<string | null>(null);
   const [activeLoreText, setActiveLoreText] = useState<string>("");
+  const [loreViewMode, setLoreViewMode] = useState<"draft" | "structured">("draft");
+  const [loreStructuredEdit, setLoreStructuredEdit] = useState<StructuredLore>({ role: "", aliases: "", publicDescription: "", hiddenTraits: "" });
+  const [isStructurizing, setIsStructurizing] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [collapsedLayers, setCollapsedLayers] = useState<Record<string, boolean>>({});
   const [selectedFlowNodeIds, setSelectedFlowNodeIds] = useState<string[]>([]);
@@ -798,6 +803,8 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const loadLoreText = (id: string) => {
     setSelectedLoreId(id);
     setActiveLoreText(project.lore?.[id] || "");
+    setLoreStructuredEdit(project.loreStructured?.[id] ?? { role: "", aliases: "", publicDescription: "", hiddenTraits: "" });
+    setLoreViewMode("draft");
   };
 
   const saveLoreText = () => {
@@ -807,6 +814,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       lore: {
         ...(prev.lore || {}),
         [selectedLoreId]: activeLoreText,
+      },
+      loreStructured: {
+        ...(prev.loreStructured || {}),
+        [selectedLoreId]: loreStructuredEdit,
       },
     }));
     setStatus(`Saved lore for ${selectedLoreId}`);
@@ -853,6 +864,52 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     if (selectedLoreId === id) {
       setSelectedLoreId(null);
       setActiveLoreText("");
+      setLoreStructuredEdit({ role: "", aliases: "", publicDescription: "", hiddenTraits: "" });
+    }
+  };
+
+  const getSelectedLoreEntityType = (): "character" | "location" | "tag" => {
+    if (!selectedLoreId) return "character";
+    if (project.characters.some(c => c.id === selectedLoreId)) return "character";
+    if (project.locations.some(l => l.id === selectedLoreId)) return "location";
+    return "tag";
+  };
+
+  const structurizeWithAI = async () => {
+    if (!selectedLoreId || !activeLoreText.trim()) return;
+    setIsStructurizing(true);
+    try {
+      const entityType = getSelectedLoreEntityType();
+      const result = await invoke<string>("run_lore_parser", {
+        draftText: activeLoreText,
+        entityType,
+      });
+      const parsed = JSON.parse(result) as StructuredLore;
+      setLoreStructuredEdit({
+        role: parsed.role ?? "[Not specified]",
+        aliases: parsed.aliases ?? "[Not specified]",
+        publicDescription: parsed.publicDescription ?? "[Not specified]",
+        hiddenTraits: parsed.hiddenTraits ?? "[Not specified]",
+      });
+      // Auto-save structured data and switch to structured mode
+      commitProject((prev) => ({
+        ...prev,
+        loreStructured: {
+          ...(prev.loreStructured || {}),
+          [selectedLoreId]: {
+            role: parsed.role ?? "[Not specified]",
+            aliases: parsed.aliases ?? "[Not specified]",
+            publicDescription: parsed.publicDescription ?? "[Not specified]",
+            hiddenTraits: parsed.hiddenTraits ?? "[Not specified]",
+          },
+        },
+      }));
+      setLoreViewMode("structured");
+      setStatus("AI parsing complete — review the structured fields");
+    } catch (err) {
+      setStatus(`Structurize failed: ${String(err)}`);
+    } finally {
+      setIsStructurizing(false);
     }
   };
 
@@ -3278,18 +3335,111 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
         <section className="flex-1 bg-slate-950 p-4 flex flex-col">
           {selectedLoreId ? (
             <>
-              <div className="flex justify-between items-center mb-4">
+              {/* Header row */}
+              <div className="flex flex-wrap justify-between items-center mb-4 gap-3">
                 <h2 className="text-xl font-bold">Editing Lore: <span className="text-emerald-400">{selectedLoreId}</span></h2>
-                <button onClick={saveLoreText} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded font-semibold transition-colors">
-                  Save Details
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* Mode toggle */}
+                  <div className="flex rounded-md bg-slate-900 p-1 gap-1">
+                    <button
+                      type="button"
+                      className={`rounded px-3 py-1 text-xs font-semibold transition-colors ${loreViewMode === "draft" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                      onClick={() => setLoreViewMode("draft")}
+                    >
+                      Draft Mode
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded px-3 py-1 text-xs font-semibold transition-colors ${loreViewMode === "structured" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                      onClick={() => setLoreViewMode("structured")}
+                    >
+                      Structured Mode
+                    </button>
+                  </div>
+                  <button
+                    onClick={saveLoreText}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded font-semibold transition-colors text-sm"
+                  >
+                    Save Details
+                  </button>
+                </div>
               </div>
-              <textarea
-                className="flex-1 w-full bg-slate-900 border border-slate-700 rounded-md p-4 text-slate-200 font-mono text-sm resize-none focus:outline-none focus:border-emerald-500"
-                value={activeLoreText}
-                onChange={(e) => setActiveLoreText(e.target.value)}
-                placeholder={`Write markdown lore details for ${selectedLoreId} here...`}
-              />
+
+              {loreViewMode === "draft" ? (
+                /* ── Draft Mode ─────────────────────────────────────── */
+                <div className="flex flex-col flex-1 gap-3">
+                  <textarea
+                    className="flex-1 w-full bg-slate-900 border border-slate-700 rounded-md p-4 text-slate-200 font-mono text-sm resize-none focus:outline-none focus:border-emerald-500 min-h-[300px]"
+                    value={activeLoreText}
+                    onChange={(e) => setActiveLoreText(e.target.value)}
+                    placeholder={`Write anything about ${selectedLoreId} here — stream of consciousness, notes, backstory fragments...`}
+                  />
+                  <button
+                    type="button"
+                    disabled={isStructurizing || !activeLoreText.trim()}
+                    onClick={structurizeWithAI}
+                    className={`self-start flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition-colors ${
+                      isStructurizing || !activeLoreText.trim()
+                        ? "bg-violet-800/50 text-slate-400 cursor-not-allowed"
+                        : "bg-violet-600 hover:bg-violet-500 text-white"
+                    }`}
+                  >
+                    {isStructurizing ? (
+                      <><span className="animate-spin">⏳</span> Structurizing…</>
+                    ) : (
+                      <>✨ Structurize with AI</>
+                    )}
+                  </button>
+                  <p className="text-xs text-slate-500">
+                    The AI will extract structured fields (Role, Aliases, Public Description, Hidden Traits) from your draft and automatically switch to Structured Mode.
+                  </p>
+                </div>
+              ) : (
+                /* ── Structured Mode ─────────────────────────────────── */
+                <div className="space-y-4 overflow-auto">
+                  <div>
+                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Role</label>
+                    <input
+                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                      value={loreStructuredEdit.role}
+                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, role: e.target.value }))}
+                      placeholder="e.g. Main antagonist, Comic relief, Quest giver…"
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Aliases / Names</label>
+                    <input
+                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                      value={loreStructuredEdit.aliases}
+                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, aliases: e.target.value }))}
+                      placeholder="e.g. The Shadow, Lord Malachar, Mal…"
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Public Description</label>
+                    <textarea
+                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 resize-none focus:outline-none focus:border-emerald-500"
+                      rows={4}
+                      value={loreStructuredEdit.publicDescription}
+                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, publicDescription: e.target.value }))}
+                      placeholder="What most characters know about this entity…"
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Hidden Traits / Secrets</label>
+                    <textarea
+                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-rose-200 bg-rose-950/20 resize-none focus:outline-none focus:border-rose-500"
+                      rows={4}
+                      value={loreStructuredEdit.hiddenTraits}
+                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, hiddenTraits: e.target.value }))}
+                      placeholder="Secrets, hidden motivations, true nature — only revealed at key plot points…"
+                    />
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Switch to <strong className="text-slate-300">Draft Mode</strong> to edit the raw notes. Hit <strong className="text-slate-300">Save Details</strong> to persist both views.
+                  </p>
+                </div>
+              )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-slate-500">

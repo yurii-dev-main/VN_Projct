@@ -1,5 +1,18 @@
 export type PlotNodeType = "Act" | "Route" | "Scene" | "Event" | "BranchPoint";
 
+export type Tag = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type StructuredLore = {
+  role: string;
+  aliases: string;
+  publicDescription: string;
+  hiddenTraits: string;
+};
+
 export type ConditionType = "playerChoice" | "flagCheck" | "random" | "relationCheck";
 
 export type Effect = {
@@ -86,6 +99,7 @@ export type SceneNode = PlotNodeBase & {
     dialogueVariants: DialogueVariant[];
     defaultNextNode?: string;
     visualImportant?: boolean;
+    tagIds?: string[];
   };
 };
 
@@ -129,6 +143,8 @@ export type PlotProject = {
   globalFlags: string[];
   layerPresets: string[];
   lore?: Record<string, string>;
+  loreStructured?: Record<string, StructuredLore>;
+  tags?: Record<string, Tag>;
 };
 
 export type AIChatMessage = {
