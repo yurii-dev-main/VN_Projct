@@ -335,6 +335,28 @@ fn run_agent_planner(app: tauri::AppHandle, prompt: String, context_json: String
     Ok("Started".to_string())
 }
 
+    #[tauri::command]
+    fn run_lore_parser(draft_text: String, entity_type: String) -> Result<String, String> {
+        // Run the small parser script synchronously and return its stdout as a string.
+        let output = std::process::Command::new("python")
+            .current_dir("../pipeline")
+            .arg("lore_parser.py")
+            .arg("--draftText")
+            .arg(draft_text)
+            .arg("--entityType")
+            .arg(entity_type)
+            .output()
+            .map_err(|e| format!("Failed to start python: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("Parser failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    }
+
 // ─────────────────────────────────────────────
 //  Internal helpers
 // ─────────────────────────────────────────────
@@ -370,7 +392,8 @@ pub fn run() {
             export_project_json,
             export_modular_project,
             run_ai_pipeline,
-            run_agent_planner
+                run_agent_planner,
+                run_lore_parser
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

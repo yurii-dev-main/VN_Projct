@@ -1600,6 +1600,27 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     }));
   };
 
+  const addSceneTag = (tagId: string) => {
+    if (!selectedNodeId || selectedNode?.type !== "Scene" || !tagId) return;
+    const scene = selectedNode as SceneNode;
+    const existing = Array.isArray((scene.parameters as any).tagIds) ? (scene.parameters as any).tagIds : [];
+    if (existing.includes(tagId)) return;
+    updateNode(selectedNodeId, () => ({
+      ...scene,
+      parameters: { ...scene.parameters, tagIds: [...existing, tagId] },
+    }));
+  };
+
+  const removeSceneTag = (tagId: string) => {
+    if (!selectedNodeId || selectedNode?.type !== "Scene") return;
+    const scene = selectedNode as SceneNode;
+    const existing = Array.isArray((scene.parameters as any).tagIds) ? (scene.parameters as any).tagIds : [];
+    updateNode(selectedNodeId, () => ({
+      ...scene,
+      parameters: { ...scene.parameters, tagIds: existing.filter((t: string) => t !== tagId) },
+    }));
+  };
+
   const addVariantPresetEffect = (variantId: string, preset: "affinity" | "flag" | "hands") => {
     if (!selectedNodeId || selectedNode?.type !== "Scene") {
       return;
@@ -2876,6 +2897,34 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                             </option>
                           ))}
                       </select>
+                    </div>
+                    <div className="mt-3">
+                      <div className="mb-1 text-xs text-slate-400">Context Tags (modular lore injectors)</div>
+                      {((selectedNodePreview?.parameters as any).tagIds || []).length === 0 ? (
+                        <div className="mb-2 text-xs text-slate-500">No tags attached to this scene.</div>
+                      ) : (
+                        <div className="mb-2 flex flex-wrap gap-1">
+                          {((selectedNodePreview?.parameters as any).tagIds || []).map((tid: string) => (
+                            <button key={tid} className="rounded-full border border-slate-700 bg-slate-800 px-2 py-1 text-xs" onClick={() => removeSceneTag(tid)}>
+                              {tid} ×
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex gap-2">
+                        <select
+                          className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
+                          value=""
+                          onChange={(e) => { if (e.target.value) { addSceneTag(e.target.value); } }}
+                        >
+                          <option value="">+ Attach a tag...</option>
+                          {Object.keys(project.tags || {}).map((tid) => (
+                            <option key={tid} value={tid}>{tid}</option>
+                          ))}
+                        </select>
+                        <button className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={() => {}}>Attach</button>
+                      </div>
+                      <div className="mt-1 text-xs text-slate-400">Tags are appended to scene prompts as temporary, situational lore.</div>
                     </div>
                   </div>
 
