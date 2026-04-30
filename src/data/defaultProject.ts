@@ -223,4 +223,6 @@ export const defaultProject: PlotProject = {
   globalFlags: ["lab_visited", "escape_attempt"],
   layerPresets: ["global", "day_1", "day_2", "route_a", "route_b", "escape_attempt", "bad_end"],
   lore: {},
+  llmProvider: 'gemini',
+  localModelName: 'qwen2.5:0.5b',
 };
