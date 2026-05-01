@@ -1,5 +1,0 @@
----
-id: doctor
-type: character
----
-

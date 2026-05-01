@@ -1,5 +1,0 @@
----
-id: mc
-type: character
----
-

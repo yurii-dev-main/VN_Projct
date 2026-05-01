@@ -20,11 +20,7 @@ fn guard_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure the projects/ directory exists, creating it if necessary.
-fn ensure_projects_dir() -> Result<(), String> {
-    fs::create_dir_all("projects")
-        .map_err(|err| format!("Failed to create 'projects' directory: {}", err))
-}
+
 
 // ─────────────────────────────────────────────
 //  Path resolution helpers

@@ -1,5 +1,0 @@
----
-id: anna
-type: character
----
-

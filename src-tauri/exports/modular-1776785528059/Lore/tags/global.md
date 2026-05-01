@@ -1,5 +1,0 @@
----
-id: global
-type: tag
----
-

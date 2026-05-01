@@ -7,11 +7,7 @@ import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 //  Types
 // ─────────────────────────────────────────────
 
-interface ProjectEntry {
-  name: string;
-  path: string;
-  modified_at: number; // Unix seconds
-}
+// Removed ProjectEntry because we use RecentProject exclusively.
 
 interface ProjectSelectorProps {
   onOpen: (projectPath: string, projectName: string) => void;
@@ -99,27 +95,20 @@ function removeRecentProject(path: string): void {
 // ─────────────────────────────────────────────
 
 export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
-  const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<ProjectEntry | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<RecentProject | null>(null);
   const [busy, setBusy] = useState(false);
 
   // ── Load list ──────────────────────────────
   const reload = async () => {
-    setLoading(true);
     setError(null);
     try {
-      const list = await invoke<ProjectEntry[]>("list_projects");
-      setProjects(list);
       setRecentProjects(getRecentProjects());
     } catch (err) {
       setError(String(err));
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -189,11 +178,11 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
       }
 
       const fileName = selected.split(/[\\/]/).pop() || selected;
-      const projectName = fileName.replace(/\.plot\.json$/i, "").replace(/\.json$/i, "");      
+      const projectName = fileName.replace(/\.plot\.json$/i, "").replace(/\.json$/i, "");
       // Save to recent projects
       saveRecentProject(selected, projectName);
       setRecentProjects(getRecentProjects());
-            onOpen(selected, projectName);
+      onOpen(selected, projectName);
     } catch (err) {
       setError(String(err));
     }
@@ -206,6 +195,7 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
     setError(null);
     try {
       await invoke("delete_project", { path: deleteTarget.path });
+      removeRecentProject(deleteTarget.path);
       setDeleteTarget(null);
       await reload();
     } catch (err) {
@@ -216,7 +206,7 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
   };
 
   // ── Display name for a project entry ───────
-  const displayName = (p: ProjectEntry) =>
+  const displayName = (p: RecentProject) =>
     p.name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
   // ─────────────────────────────────────────────
@@ -402,86 +392,10 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
           </div>
         )}
 
-        {/* Recent Projects Section */}
-        {recentProjects.length > 0 && (
-          <>
-            <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: "#64748b", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                Recent Projects ({recentProjects.length})
-              </h2>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16, marginBottom: 40 }}>
-              {recentProjects.map((recent) => (
-                <div
-                  key={recent.path}
-                  onClick={() => onOpen(recent.path, recent.name)}
-                  style={{
-                    padding: 16,
-                    borderRadius: 12,
-                    border: "1px solid rgba(99,102,241,0.3)",
-                    background: "linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(6,182,212,0.05) 100%)",
-                    cursor: "pointer",
-                    transition: "all 0.2s ease",
-                    boxShadow: "0 4px 12px rgba(99,102,241,0.1)",
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.borderColor = "#6366f1";
-                    (e.currentTarget as HTMLElement).style.boxShadow = "0 8px 16px rgba(99,102,241,0.2)";
-                    (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)";
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.borderColor = "rgba(99,102,241,0.3)";
-                    (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 12px rgba(99,102,241,0.1)";
-                    (e.currentTarget as HTMLElement).style.transform = "translateY(0)";
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 4 }}>
-                        📄 {recent.name}
-                      </div>
-                      <div style={{ fontSize: 11, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {recent.path}
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeRecentProject(recent.path);
-                        setRecentProjects(getRecentProjects());
-                      }}
-                      style={{
-                        background: "rgba(239,68,68,0.2)",
-                        border: "none",
-                        color: "#fca5a5",
-                        borderRadius: 6,
-                        padding: "4px 8px",
-                        fontSize: 12,
-                        cursor: "pointer",
-                        marginLeft: 8,
-                        transition: "background 0.2s",
-                      }}
-                      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(239,68,68,0.4)")}
-                      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(239,68,68,0.2)")}
-                      title="Remove from recent"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  <div style={{ fontSize: 10, color: "#475569" }}>
-                    {new Date(recent.timestamp).toLocaleDateString()}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-
         {/* Section label */}
         <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: "#64748b", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-            Your Projects {!loading && `(${projects.length})`}
+            Recent Projects
           </h2>
           <button
             onClick={reload}
@@ -508,24 +422,8 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
           </button>
         </div>
 
-        {/* Loading skeleton */}
-        {loading ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-            {[1, 2, 3].map((i) => (
-              <div
-                key={i}
-                style={{
-                  height: 130,
-                  borderRadius: 12,
-                  background: "rgba(30,41,59,0.6)",
-                  border: "1px solid rgba(100,116,139,0.1)",
-                  animation: "pulse 1.5s ease-in-out infinite",
-                  opacity: 1 - i * 0.15,
-                }}
-              />
-            ))}
-          </div>
-        ) : projects.length === 0 ? (
+        {/* Removed loading skeleton since localStorage is instant */}
+        {recentProjects.length === 0 ? (
           /* Empty state */
           <div
             style={{
@@ -547,21 +445,30 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
         ) : (
           /* Project grid */
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-            {projects.map((project) => (
+            {recentProjects.map((project) => (
               <ProjectCard
                 key={project.path}
                 project={project}
                 displayName={displayName(project)}
-                formattedDate={formatDate(project.modified_at)}
+                formattedDate={formatDate(project.timestamp / 1000)}
                 onOpen={async () => {
-                  // The path from list_projects is now absolute, but safeguard
-                  // with a resolve call for legacy relative entries.
                   let absolutePath = project.path;
                   try {
                     absolutePath = await invoke<string>("resolve_absolute_path", { path: project.path });
                   } catch {
-                    // Fall through with existing path
+                    // Fall through
                   }
+
+                  // Graceful Error Handling: check if file exists
+                  try {
+                    await invoke("load_project_json", { path: absolutePath });
+                  } catch (err) {
+                    setError(`File not found: ${absolutePath}`);
+                    removeRecentProject(project.path);
+                    await reload();
+                    return;
+                  }
+
                   const projName = displayName(project);
                   saveRecentProject(absolutePath, projName);
                   setRecentProjects(getRecentProjects());
@@ -664,7 +571,7 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
 // ─────────────────────────────────────────────
 
 interface CardProps {
-  project: ProjectEntry;
+  project: RecentProject;
   displayName: string;
   formattedDate: string;
   onOpen: () => void;
