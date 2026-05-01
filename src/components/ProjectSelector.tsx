@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
+import { join } from "@tauri-apps/api/path";
+import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 
 // ─────────────────────────────────────────────
 //  Types
@@ -149,16 +150,22 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
     setCreating(true);
     setError(null);
     try {
-      const path = await dialogSave({
-        defaultPath: `${slug}.plot.json`,
-        filters: [{ name: "Plot Project", extensions: ["json"] }],
+      const selectedDir = await dialogOpen({
+        directory: true,
+        multiple: false,
+        title: "Select Directory to Create Project",
       });
 
-      if (!path) {
+      if (!selectedDir || typeof selectedDir !== "string") {
         return;
       }
 
+      const path = await join(selectedDir, `${slug}.plot.json`);
+
       await invoke("save_project_json", { path, payload: emptyProject });
+      // path from dialog is already absolute
+      saveRecentProject(path, slug);
+      setRecentProjects(getRecentProjects());
       setNewName("");
       onOpen(path, slug);
     } catch (err) {
@@ -546,7 +553,20 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
                 project={project}
                 displayName={displayName(project)}
                 formattedDate={formatDate(project.modified_at)}
-                onOpen={() => onOpen(project.path, displayName(project))}
+                onOpen={async () => {
+                  // The path from list_projects is now absolute, but safeguard
+                  // with a resolve call for legacy relative entries.
+                  let absolutePath = project.path;
+                  try {
+                    absolutePath = await invoke<string>("resolve_absolute_path", { path: project.path });
+                  } catch {
+                    // Fall through with existing path
+                  }
+                  const projName = displayName(project);
+                  saveRecentProject(absolutePath, projName);
+                  setRecentProjects(getRecentProjects());
+                  onOpen(absolutePath, projName);
+                }}
                 onDelete={() => setDeleteTarget(project)}
               />
             ))}

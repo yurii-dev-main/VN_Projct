@@ -27,6 +27,40 @@ fn ensure_projects_dir() -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────
+//  Path resolution helpers
+// ─────────────────────────────────────────────
+
+/// Resolve a path to its absolute form using the current working directory.
+#[tauri::command]
+fn resolve_absolute_path(path: &str) -> Result<String, String> {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Ok(p.to_string_lossy().to_string());
+    }
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let absolute = cwd.join(p);
+    // Canonicalize if the file exists, otherwise just use the joined path
+    match fs::canonicalize(&absolute) {
+        Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
+        Err(_) => Ok(absolute.to_string_lossy().to_string()),
+    }
+}
+
+/// Return the absolute path to the default `projects/` directory.
+#[tauri::command]
+fn get_projects_base_dir() -> Result<String, String> {
+    ensure_projects_dir()?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let projects_dir = cwd.join("projects");
+    match fs::canonicalize(&projects_dir) {
+        Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
+        Err(_) => Ok(projects_dir.to_string_lossy().to_string()),
+    }
+}
+
+// ─────────────────────────────────────────────
 //  Project-file I/O
 // ─────────────────────────────────────────────
 
@@ -114,7 +148,11 @@ fn list_projects() -> Result<Vec<ProjectEntry>, String> {
             .unwrap_or(&file_name)
             .replace('_', " ");
 
-        let path_str = format!("projects/{}", file_name);
+        // Use the absolute path so "recent projects" always resolve correctly
+        let path_str = match fs::canonicalize(&path) {
+            Ok(canonical) => canonical.to_string_lossy().to_string(),
+            Err(_) => format!("projects/{}", file_name),
+        };
 
         let modified_at = entry
             .metadata()
@@ -189,12 +227,13 @@ fn export_modular_project(export_dir: &str, payload: &str) -> Result<(), String>
 // ─────────────────────────────────────────────
 
 #[tauri::command]
-fn run_ai_pipeline(app: tauri::AppHandle, export_dir: String) -> Result<String, String> {
+fn run_ai_pipeline(app: tauri::AppHandle, export_dir: String, project_path: String) -> Result<String, String> {
     std::thread::spawn(move || {
         let mut child = match std::process::Command::new("python")
             .current_dir("../pipeline")
             .arg("generator.py")
             .arg(export_dir)
+            .arg(project_path)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -396,7 +435,9 @@ pub fn run() {
             export_modular_project,
             run_ai_pipeline,
             run_agent_planner,
-            run_lore_parser
+            run_lore_parser,
+            resolve_absolute_path,
+            get_projects_base_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -114,3 +114,14 @@ button {
     background-color: #0f0f0f69;
   }
 }
+
+/* ── Autosave indicator animations ── */
+@keyframes autosaveSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes autosaveFadeOut {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
+}

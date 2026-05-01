@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import base64
 sys.stdout.reconfigure(encoding='utf-8')
 import glob
 import json
@@ -270,6 +271,28 @@ async def process_scene_node(
     
     print(f"    -> Saved to: {os.path.relpath(output_path, export_dir)}")
     
+    # Objective 2: Write-back to JSON
+    if project_file and os.path.exists(project_file):
+        try:
+            with open(project_file, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+            
+            proj_node = project_data.get("nodes", {}).get(node_id)
+            if proj_node:
+                if "data" not in proj_node:
+                    proj_node["data"] = {}
+                proj_node["data"]["generated_text"] = scene_text
+                
+                with open(project_file, 'w', encoding='utf-8') as f:
+                    json.dump(project_data, f, indent=2, ensure_ascii=False)
+                print(f"    -> Injected generated_text into {project_file}")
+                
+                # Emit to React frontend
+                b64_text = base64.b64encode(scene_text.encode('utf-8')).decode('utf-8')
+                print(f"__PLOT_NODE_GENERATED__:{node_id}:{b64_text}", flush=True)
+        except Exception as e:
+            print(f"    -> [ERROR] Failed to update project file: {e}")
+    
     new_bridge = await generate_bridge(scene_text)
     print(f"    -> Generated bridge: {new_bridge[:60]}...")
     return new_bridge, scene_counter + 1
@@ -309,6 +332,7 @@ async def dfs_execute(
     current_act: str = "Uncategorized_Act",
     current_route: str = "Main_Route",
     scene_counter: int = 1,
+    project_file: str = "",
 ) -> Tuple[str, int, int]:
     """
     Execute DFS traversal through the narrative graph.
@@ -347,6 +371,7 @@ async def dfs_execute(
                 current_act=next_act,
                 current_route=current_route,
                 scene_counter=scene_counter,
+                project_file=project_file,
             )
         else:
             print(f"{indent}[ACT] No outgoing connections, ending this path")
@@ -358,6 +383,7 @@ async def dfs_execute(
             node_id, node, lore_db, bridge_summary, context,
             export_dir, global_style_prompt,
             current_act, current_route, scene_counter,
+            project_file,
         )
         scenes_generated = 1
         
@@ -371,6 +397,7 @@ async def dfs_execute(
                 current_act=current_act,
                 current_route=current_route,
                 scene_counter=scene_counter,
+                project_file=project_file,
             )
             return next_bridge, scenes_generated + next_scenes, scene_counter
         else:
@@ -392,7 +419,13 @@ async def dfs_execute(
         all_results = []
         total_scenes = 0
         
+        # Snapshot the visited nodes so each branch explores fully and merges properly
+        snapshot_visited = set(context.visited_nodes)
+        
         for choice_idx, choice in enumerate(choices):
+            # Restore state for this branch
+            context.visited_nodes = set(snapshot_visited)
+            
             choice_text = choice.get("text", f"Choice {choice_idx + 1}")
             next_node_id = choice.get("nextNode", "")
             
@@ -422,6 +455,7 @@ async def dfs_execute(
                 current_act=current_act,
                 current_route=current_route,
                 scene_counter=scene_counter,
+                project_file=project_file,
             )
             
             all_results.append((choice_text, result_bridge, result_scenes))
@@ -451,6 +485,7 @@ async def dfs_execute(
                 current_act=current_act,
                 current_route=next_route,
                 scene_counter=scene_counter,
+                project_file=project_file,
             )
         else:
             return bridge_summary, 0, scene_counter
@@ -467,6 +502,7 @@ async def dfs_execute(
                 current_act=current_act,
                 current_route=current_route,
                 scene_counter=scene_counter,
+                project_file=project_file,
             )
         else:
             return bridge_summary, 0, scene_counter
@@ -522,7 +558,7 @@ def export_lore(export_dir: str, lore_db: Dict[str, str], nodes: Dict[str, Dict[
     print(f"  [LORE EXPORT] Exported {char_count} lore entries + node index to Generated/Lore/")
 
 
-async def run_dfs(export_dir: str):
+async def run_dfs(export_dir: str, project_file: str = ""):
     
     if not os.path.exists(export_dir):
         print("Directory not found!")
@@ -574,6 +610,7 @@ async def run_dfs(export_dir: str):
         current_act="Uncategorized_Act",
         current_route="Main_Route",
         scene_counter=1,
+        project_file=project_file,
     )
     
     # Update progress state
@@ -598,8 +635,9 @@ async def run_dfs(export_dir: str):
     print(f"  Final context: {final_bridge[:80]}...")
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) < 2:
-        print("Usage: python generator.py <export_dir>")
+        print("Usage: python generator.py <export_dir> [project_file]")
         sys.exit(1)
-    asyncio.run(run_dfs(sys.argv[1]))
+    export_dir_arg = sys.argv[1]
+    project_file_arg = sys.argv[2] if len(sys.argv) > 2 else ""
+    asyncio.run(run_dfs(export_dir_arg, project_file_arg))

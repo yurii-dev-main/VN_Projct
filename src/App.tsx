@@ -83,7 +83,6 @@ const createSlug = (value: string): string =>
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
 
-const isSourceTreePath = (path: string): boolean => path.startsWith("projects/") || path.startsWith("projects\\");
 
 const sanitizeFileName = (value: string): string =>
   value
@@ -250,11 +249,19 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [isLorePopoverOpen, setIsLorePopoverOpen] = useState(false);
   const lorePopoverRef = useRef<HTMLDivElement | null>(null);
   const stagedMutationsRef = useRef<AgentMutationRecord[]>([]);
-  const [lastSavedPath, setLastSavedPath] = useState<string>(() => {
-    const stored = localStorage.getItem("plot-architect:lastSavedPath") || "";
-    return stored || (isSourceTreePath(projectPath) ? "" : projectPath);
-  });
+  
+  // Single source of truth for the latest project state for event closures
+  const latestProjectRef = useRef<PlotProject>(project);
+  useEffect(() => {
+    latestProjectRef.current = project;
+  }, [project]);
   const [lastExportDir, setLastExportDir] = useState<string>(() => localStorage.getItem("plot-architect:lastExportDir") || "");
+
+  // Autosave state
+  const [autosaveStatus, setAutosaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const projectSnapshotRef = useRef<string>("");
+  const isInitialLoadRef = useRef(true);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState("");
@@ -276,6 +283,25 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       const line = event.payload;
       if (line.startsWith("__PLOT_NODE_ACTIVE__:")) {
         setActiveGenNodeId(line.split(":")[1]);
+      } else if (line.startsWith("__PLOT_NODE_GENERATED__:!")) {
+        // Just skip this, it's a fallback if regex failed but it shouldn't
+      } else if (line.startsWith("__PLOT_NODE_GENERATED__:")) {
+        const parts = line.split(":");
+        if (parts.length >= 3) {
+          const nodeId = parts[1];
+          const b64Text = parts.slice(2).join(":");
+          try {
+            const text = decodeURIComponent(escape(window.atob(b64Text)));
+            setProject((previous) => {
+              const node = previous.nodes[nodeId];
+              if (!node) return previous;
+              const nextNode = { ...node, data: { ...node.data, generated_text: text } } as PlotNode;
+              return { ...previous, nodes: { ...previous.nodes, [nodeId]: nextNode } };
+            });
+          } catch (e) {
+            console.error("Failed to decode generated text", e);
+          }
+        }
       } else if (line.startsWith("__PIPELINE_COMPLETE__") || line.startsWith("__PIPELINE_ERROR__")) {
         setIsGenerating(false);
         setActiveGenNodeId(null);
@@ -379,6 +405,9 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     historyRef.current = [cloneProject(defaultProject)];
     historyIndexRef.current = 0;
     setProject(cloneProject(defaultProject));
+    // Reset autosave baseline so loading doesn't trigger a false save
+    isInitialLoadRef.current = true;
+    projectSnapshotRef.current = "";
 
     invoke<string>("load_project_json", { path: projectPath })
       .then((raw) => {
@@ -387,10 +416,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
         historyIndexRef.current = 0;
         setProject(cloneProject(loaded));
         setAiChatMessages(loaded.aiChatHistory ?? []);
+        // Set autosave baseline to the loaded project state
+        projectSnapshotRef.current = JSON.stringify(loaded);
+        isInitialLoadRef.current = false;
         setStatus("Ready");
       })
       .catch(() => {
         setAiChatMessages([]);
+        isInitialLoadRef.current = false;
         setStatus("New project — not saved yet");
       });
   // projectPath is the only real dependency here
@@ -1454,30 +1487,12 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const saveProject = useCallback(async (proj?: PlotProject) => {
     const payload = JSON.stringify(proj ?? project, null, 2);
     try {
-      let targetPath = lastSavedPath;
-
-      if (!targetPath) {
-        const selected = await dialogSave({
-          defaultPath: `${sanitizeFileName(project.meta.title || projectName)}.plot.json`,
-          filters: [{ name: "Plot Project", extensions: ["json"] }],
-        });
-
-        if (!selected) {
-          setStatus("Save cancelled");
-          return;
-        }
-
-        targetPath = selected;
-        setLastSavedPath(selected);
-      }
-
-      await invoke("save_project_json", { path: targetPath, payload });
-      setStatus(`Saved — ${targetPath}`);
+      await invoke("save_project_json", { path: projectPath, payload });
+      setStatus(`Saved — ${projectPath}`);
     } catch (error) {
       setStatus(`Save failed: ${String(error)}`);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, lastSavedPath, project.meta.title, projectName]);
+  }, [project, projectPath]);
 
   const exportProject = async () => {
     const fileName = await dialogSave({
@@ -1570,7 +1585,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     setIsGenerating(true);
     setStatus("Running AI Generation pipeline...");
     try {
-      await invoke("run_ai_pipeline", { exportDir: lastExportPath });
+      await invoke("run_ai_pipeline", { exportDir: lastExportPath, projectPath });
       setStatus(`Generation started successfully!`);
     } catch (error) {
       setIsGenerating(false);
@@ -1756,6 +1771,12 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
         return;
       }
 
+      if (event.ctrlKey && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveProject();
+        return;
+      }
+
       if (event.ctrlKey && event.key.toLowerCase() === "z") {
         event.preventDefault();
         undo();
@@ -1787,7 +1808,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deleteSelection, redo, removeNode, selectedFlowEdgeIds, selectedFlowNodeIds, selectedNodeId, undo]);
+  }, [deleteSelection, redo, removeNode, saveProject, selectedFlowEdgeIds, selectedFlowNodeIds, selectedNodeId, undo]);
 
   const selectedNodePreview = selectedNode?.type === "Scene" ? (selectedNode as SceneNode) : null;
   const selectedActPreview = selectedNode?.type === "Act" ? (selectedNode as ActNode) : null;
@@ -1906,9 +1927,64 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
   // Autosave then return to project selection
   const handleBack = useCallback(async () => {
-    await saveProject();
+    setStatus("Saving before exit...");
+    try {
+      const payload = JSON.stringify(latestProjectRef.current, null, 2);
+      await invoke("save_project_json", { path: projectPath, payload });
+    } catch (e) {
+      console.error("Failed to save on exit", e);
+    }
     onBack();
-  }, [saveProject, onBack]);
+  }, [projectPath, onBack]);
+
+  // ── Debounced Autosave Effect ──────────────────────
+  // Watches for changes to the project state and triggers a save
+  // after 2.5 seconds of inactivity. Skips the initial load.
+  useEffect(() => {
+    const currentSnapshot = JSON.stringify(project);
+
+    // Skip on initial load – set baseline snapshot
+    if (isInitialLoadRef.current) {
+      projectSnapshotRef.current = currentSnapshot;
+      isInitialLoadRef.current = false;
+      return;
+    }
+
+    // No change since last save/load → nothing to do
+    if (currentSnapshot === projectSnapshotRef.current) {
+      return;
+    }
+
+    // Clear existing debounce timer
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+    }
+
+    autosaveTimerRef.current = setTimeout(async () => {
+      if (!projectPath) return;
+
+      try {
+        setAutosaveStatus("saving");
+        const payload = JSON.stringify(project, null, 2);
+        await invoke("save_project_json", { path: projectPath, payload });
+        projectSnapshotRef.current = currentSnapshot;
+        setAutosaveStatus("saved");
+        // Fade back to idle after 3 seconds
+        setTimeout(() => setAutosaveStatus("idle"), 3000);
+      } catch {
+        setAutosaveStatus("error");
+        setTimeout(() => setAutosaveStatus("idle"), 5000);
+      }
+    }, 2500);
+
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, projectPath]);
+
 
   const handleRouteInspectorChange = (nextRoute: RouteNode) => {
     updateNode(nextRoute.id, () => nextRoute);
@@ -1946,13 +2022,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     aiChatScrollRef.current.scrollTop = aiChatScrollRef.current.scrollHeight;
   }, [aiChatMessages]);
 
-  useEffect(() => {
-    if (lastSavedPath) {
-      localStorage.setItem("plot-architect:lastSavedPath", lastSavedPath);
-    } else {
-      localStorage.removeItem("plot-architect:lastSavedPath");
-    }
-  }, [lastSavedPath]);
+
 
   useEffect(() => {
     if (lastExportDir) {
@@ -2046,6 +2116,50 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
             <h1 className="text-lg font-bold tracking-wide">{projectName}</h1>
             <p className="text-xs text-slate-400">{status}</p>
           </div>
+
+          {/* Autosave indicator */}
+          {autosaveStatus !== "idle" && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "3px 10px",
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 500,
+                letterSpacing: "0.02em",
+                animation: autosaveStatus === "saved" ? "autosaveFadeOut 3s ease forwards" : "none",
+                background:
+                  autosaveStatus === "saving"
+                    ? "rgba(99,102,241,0.15)"
+                    : autosaveStatus === "saved"
+                      ? "rgba(34,197,94,0.15)"
+                      : "rgba(239,68,68,0.15)",
+                color:
+                  autosaveStatus === "saving"
+                    ? "#a5b4fc"
+                    : autosaveStatus === "saved"
+                      ? "#86efac"
+                      : "#fca5a5",
+                border:
+                  autosaveStatus === "saving"
+                    ? "1px solid rgba(99,102,241,0.3)"
+                    : autosaveStatus === "saved"
+                      ? "1px solid rgba(34,197,94,0.3)"
+                      : "1px solid rgba(239,68,68,0.3)",
+              }}
+            >
+              {autosaveStatus === "saving" && (
+                <span style={{ display: "inline-block", animation: "autosaveSpin 1s linear infinite", fontSize: 12 }}>⟳</span>
+              )}
+              {autosaveStatus === "saving"
+                ? "Saving…"
+                : autosaveStatus === "saved"
+                  ? "✓ All changes saved"
+                  : "⚠ Autosave failed"}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -2196,21 +2310,17 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                         <div className="flex-1 space-y-4 rounded-lg border border-slate-700/50 bg-slate-800/30 p-4">
                           {isScene && (() => {
                             const scene = currentNode as SceneNode;
+                            const generatedText = scene.data?.generated_text;
                             return (
                               <div className="space-y-3">
-                                {scene.parameters.narrativeAction && (
-                                  <p className="text-sm leading-relaxed text-slate-200">
-                                    {scene.parameters.narrativeAction}
+                                {generatedText ? (
+                                  <p className="text-sm leading-relaxed text-slate-200 whitespace-pre-wrap">
+                                    {generatedText}
                                   </p>
-                                )}
-                                {scene.parameters.dialogueVariants.length > 0 && (
-                                  <div className="space-y-2 border-t border-slate-700/50 pt-3">
-                                    {scene.parameters.dialogueVariants.map((variant) => (
-                                      <div key={variant.id} className="text-sm text-slate-300">
-                                        <span className="font-semibold text-emerald-400">Dialogue:</span> {variant.text}
-                                      </div>
-                                    ))}
-                                  </div>
+                                ) : (
+                                  <p className="text-sm italic text-slate-400">
+                                    *[Scene not yet generated by AI]*
+                                  </p>
                                 )}
                               </div>
                             );
@@ -3785,22 +3895,30 @@ type AppScreen =
 function App() {
   const [screen, setScreen] = useState<AppScreen>({ kind: "selecting" });
 
-  const openProject = useCallback((projectPath: string, projectName: string) => {
-    // Save to recent projects
+  const openProject = useCallback(async (projectPath: string, projectName: string) => {
+    // Resolve to absolute path to ensure recent projects always work
+    let resolvedPath = projectPath;
+    try {
+      resolvedPath = await invoke<string>("resolve_absolute_path", { path: projectPath });
+    } catch {
+      // Fall through with original path
+    }
+
+    // Save to recent projects with absolute path
     try {
       const recentProjectsKey = "plot-architect:recentProjects";
       const stored = localStorage.getItem(recentProjectsKey);
       const recent = stored ? JSON.parse(stored) : [];
-      const filtered = recent.filter((p: any) => p.path !== projectPath);
+      const filtered = recent.filter((p: any) => p.path !== resolvedPath);
       const updated = [
-        { path: projectPath, name: projectName, timestamp: Date.now() },
+        { path: resolvedPath, name: projectName, timestamp: Date.now() },
         ...filtered,
       ].slice(0, 10);
       localStorage.setItem(recentProjectsKey, JSON.stringify(updated));
     } catch {
       // Silently fail
     }
-    setScreen({ kind: "editing", projectPath, projectName });
+    setScreen({ kind: "editing", projectPath: resolvedPath, projectName });
   }, []);
 
   const goBack = useCallback(() => {

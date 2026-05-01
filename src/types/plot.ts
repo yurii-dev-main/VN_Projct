@@ -55,6 +55,10 @@ export type PlotNodeBase = {
   connectedFrom: string[];
   connectedTo: string[];
   parameters: Record<string, unknown>;
+  data?: {
+    generated_text?: string;
+    [key: string]: any;
+  };
 };
 
 export type ActNode = PlotNodeBase & {
