@@ -244,6 +244,7 @@ async def process_scene_node(
     current_act: str,
     current_route: str,
     scene_counter: int,
+    project_file: str,
 ) -> Tuple[str, int]:
     """Generate text for a Scene node.
     

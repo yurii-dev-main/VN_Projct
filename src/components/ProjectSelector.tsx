@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { isTauriAvailable } from "../utils/tauri";
 
 // ─────────────────────────────────────────────
 //  Types
@@ -120,6 +121,10 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
 
   // ── Create project ─────────────────────────
   const handleCreate = async () => {
+    if (!isTauriAvailable()) {
+      setError("Cannot create projects in web mode. Please use desktop app.");
+      return;
+    }
     const slug = slugify(newName);
     if (!slug) {
       setError("Project name must contain at least one valid character.");
@@ -165,6 +170,10 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
   };
 
   const handleOpenProject = async () => {
+    if (!isTauriAvailable()) {
+      setError("Cannot open projects in web mode. Please use desktop app.");
+      return;
+    }
     setError(null);
     try {
       const selected = await dialogOpen({
@@ -190,7 +199,7 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
 
   // ── Delete project ─────────────────────────
   const confirmDelete = async () => {
-    if (!deleteTarget) return;
+    if (!deleteTarget || !isTauriAvailable()) return;
     setBusy(true);
     setError(null);
     try {
@@ -452,6 +461,10 @@ export function ProjectSelector({ onOpen }: ProjectSelectorProps) {
                 displayName={displayName(project)}
                 formattedDate={formatDate(project.timestamp / 1000)}
                 onOpen={async () => {
+                  if (!isTauriAvailable()) {
+                    setError("Cannot open projects in web mode. Please use desktop app.");
+                    return;
+                  }
                   let absolutePath = project.path;
                   try {
                     absolutePath = await invoke<string>("resolve_absolute_path", { path: project.path });

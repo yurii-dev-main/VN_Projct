@@ -6,12 +6,31 @@ export type Tag = {
   description: string;
 };
 
-export type StructuredLore = {
+export type LoreEntityType = "character" | "location" | "variable";
+
+export type CharacterStructuredLore = {
+  type?: "character";
   role: string;
   aliases: string;
   publicDescription: string;
   hiddenTraits: string;
 };
+
+export type LocationStructuredLore = {
+  type: "location";
+  region: string;
+  landmarks: string;
+  atmosphere: string;
+  secrets: string;
+};
+
+export type VariableStructuredLore = {
+  type: "variable";
+  varType: "number" | "boolean";
+  defaultValue: number | boolean;
+};
+
+export type StructuredLore = CharacterStructuredLore | LocationStructuredLore | VariableStructuredLore;
 
 export type ConditionType = "playerChoice" | "flagCheck" | "random" | "relationCheck";
 
@@ -77,7 +96,7 @@ export type RouteNode = PlotNodeBase & {
   type: "Route";
   parameters: {
     divergencePoint: string;
-    conditions: { flag: string; value: boolean }[];
+    conditions: { flag: string; operator: "==" | ">" | "<"; value: string | number | boolean }[];
     title: string;
     color: string;
   };
@@ -188,7 +207,7 @@ export type AgentMutationRecord =
   | {
       type: string;
       action: "ADD_LORE";
-      entityType: "character" | "location" | "tag";
+      entityType: "character" | "location" | "variable" | "tag";
       node_id?: string;
       edge?: { id?: string };
       payload: {

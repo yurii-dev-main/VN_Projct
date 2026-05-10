@@ -361,7 +361,8 @@ def extract_json_payload(text: str) -> Dict[str, Any]:
     last_error: Exception | None = None
     for candidate in candidates:
         try:
-            loaded = json.loads(candidate)
+            sanitized_candidate = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', candidate)
+            loaded = json.loads(sanitized_candidate)
             if isinstance(loaded, dict):
                 return loaded
             raise ValueError("Planner response must be a JSON object.")

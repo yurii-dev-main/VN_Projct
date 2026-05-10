@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
+import { isTauriAvailable } from "./utils/tauri";
 import ReactFlow, {
   Background,
   Connection,
@@ -21,7 +22,7 @@ import { PlotNode as PlotNodeView } from "./components/PlotNode";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { RouteInspector } from "./components/RouteInspector";
 import { createDefaultNode, defaultProject } from "./data/defaultProject";
-import { AIChatMessage, ActNode, AgentMutationRecord, BranchChoice, BranchPointNode, DialogueVariant, EventNode, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode, StructuredLore } from "./types/plot";
+import { AIChatMessage, ActNode, AgentMutationRecord, BranchChoice, BranchPointNode, CharacterStructuredLore, DialogueVariant, EventNode, LocationStructuredLore, LoreEntityType, NodeOverride, PlotNode, PlotNodeType, PlotProject, RouteNode, SceneNode, StructuredLore, VariableStructuredLore } from "./types/plot";
 import { sanitizeNodeForAI } from "./utils/aiExport";
 import { getLayoutedElements } from "./utils/layout";
 
@@ -38,10 +39,17 @@ type AgentTask = {
 
 type LoreContextItem = {
   key: string;
-  kind: "Character" | "Location" | "Tag";
+  kind: "Character" | "Location" | "Variable" | "Tag";
   id: string;
   label: string;
   description: string;
+};
+
+type LoreEntityOption = {
+  id: string;
+  label: string;
+  type: "character" | "location" | "variable";
+  variableType?: "number" | "boolean";
 };
 
 const nodeTypes = {
@@ -52,27 +60,70 @@ const nodeTypes = {
 const dedupe = (values: string[]): string[] => [...new Set(values.filter(Boolean))];
 const cloneProject = (project: PlotProject): PlotProject => JSON.parse(JSON.stringify(project)) as PlotProject;
 const defaultProjectSnapshot = cloneProject(defaultProject);
-const normalizeProject = (project: Partial<PlotProject>): PlotProject => ({
-  ...defaultProjectSnapshot,
-  ...project,
-  meta: {
-    ...defaultProjectSnapshot.meta,
-    ...(project.meta || {}),
-  },
-  globalStylePrompt: project.globalStylePrompt ?? "",
-  aiChatHistory: project.aiChatHistory ?? [],
-  nodes: project.nodes ?? defaultProjectSnapshot.nodes,
-  acts: project.acts ?? defaultProjectSnapshot.acts,
-  routes: project.routes ?? defaultProjectSnapshot.routes,
-  startNodeId: project.startNodeId ?? defaultProjectSnapshot.startNodeId,
-  characters: project.characters ?? defaultProjectSnapshot.characters,
-  locations: project.locations ?? defaultProjectSnapshot.locations,
-  globalFlags: project.globalFlags ?? defaultProjectSnapshot.globalFlags,
-  layerPresets: project.layerPresets ?? defaultProjectSnapshot.layerPresets,
-  lore: project.lore ?? defaultProjectSnapshot.lore,
-  loreStructured: project.loreStructured ?? {},
-  tags: project.tags ?? {},
-});
+const normalizeProject = (project: Partial<PlotProject>): PlotProject => {
+  const characters = project.characters ?? defaultProjectSnapshot.characters;
+  const locations = project.locations ?? defaultProjectSnapshot.locations;
+  const globalFlags = project.globalFlags ?? defaultProjectSnapshot.globalFlags;
+  const sourceNodes = project.nodes ?? defaultProjectSnapshot.nodes;
+  const nodes = Object.fromEntries(
+    Object.entries(sourceNodes).map(([id, node]) => {
+      if (node.type !== "Route") {
+        return [id, node];
+      }
+
+      const routeNode = node as RouteNode;
+      const normalizedConditions = (routeNode.parameters.conditions ?? []).map((condition) => {
+        const rawOperator = (condition as { operator?: string }).operator;
+        const normalizedOperator = rawOperator === "==" || rawOperator === ">" || rawOperator === "<" ? rawOperator : "==";
+        return {
+          flag: String((condition as { flag?: string }).flag ?? ""),
+          operator: normalizedOperator,
+          value: (condition as { value?: string | number | boolean }).value ?? false,
+        };
+      });
+
+      return [
+        id,
+        {
+          ...routeNode,
+          parameters: {
+            ...routeNode.parameters,
+            conditions: normalizedConditions,
+          },
+        },
+      ];
+    }),
+  ) as Record<string, PlotNode>;
+  const rawLoreStructured = asRecord(project.loreStructured) ?? {};
+  const normalizedLoreStructured = Object.fromEntries(
+    Object.entries(rawLoreStructured).map(([id, entry]) => [
+      id,
+      normalizeStructuredLoreEntry(id, entry, locations, globalFlags),
+    ]),
+  ) as Record<string, StructuredLore>;
+
+  return {
+    ...defaultProjectSnapshot,
+    ...project,
+    meta: {
+      ...defaultProjectSnapshot.meta,
+      ...(project.meta || {}),
+    },
+    globalStylePrompt: project.globalStylePrompt ?? "",
+    aiChatHistory: project.aiChatHistory ?? [],
+    nodes,
+    acts: project.acts ?? defaultProjectSnapshot.acts,
+    routes: project.routes ?? defaultProjectSnapshot.routes,
+    startNodeId: project.startNodeId ?? defaultProjectSnapshot.startNodeId,
+    characters,
+    locations,
+    globalFlags,
+    layerPresets: project.layerPresets ?? defaultProjectSnapshot.layerPresets,
+    lore: project.lore ?? defaultProjectSnapshot.lore,
+    loreStructured: normalizedLoreStructured,
+    tags: project.tags ?? {},
+  };
+};
 const getPrimaryLayer = (node: PlotNode): string => node.layerTags[0] ?? "ungrouped";
 const equalStringArrays = (left: string[], right: string[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
@@ -82,6 +133,107 @@ const createSlug = (value: string): string =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+
+const defaultCharacterLore = (): CharacterStructuredLore => ({
+  type: "character",
+  role: "",
+  aliases: "",
+  publicDescription: "",
+  hiddenTraits: "",
+});
+
+const defaultLocationLore = (): LocationStructuredLore => ({
+  type: "location",
+  region: "",
+  landmarks: "",
+  atmosphere: "",
+  secrets: "",
+});
+
+const defaultVariableLore = (): VariableStructuredLore => ({
+  type: "variable",
+  varType: "boolean",
+  defaultValue: false,
+});
+
+const createDefaultStructuredLore = (type: LoreEntityType): StructuredLore => {
+  if (type === "location") {
+    return defaultLocationLore();
+  }
+  if (type === "variable") {
+    return defaultVariableLore();
+  }
+  return defaultCharacterLore();
+};
+
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+};
+
+const normalizeStructuredLoreEntry = (
+  id: string,
+  rawEntry: unknown,
+  locations: { id: string }[],
+  globalFlags: string[],
+): StructuredLore => {
+  const entry = asRecord(rawEntry) ?? {};
+  const rawType = String(entry.type ?? "").toLowerCase();
+  const inLocations = locations.some((item) => item.id === id);
+  const inFlags = globalFlags.includes(id);
+
+  const inferredType: LoreEntityType =
+    rawType === "location" || rawType === "variable" || rawType === "character"
+      ? (rawType as LoreEntityType)
+      : inLocations
+        ? "location"
+        : inFlags
+          ? "variable"
+          : "character";
+
+  if (inferredType === "location") {
+    return {
+      type: "location",
+      region: String(entry.region ?? entry.role ?? ""),
+      landmarks: String(entry.landmarks ?? entry.aliases ?? ""),
+      atmosphere: String(entry.atmosphere ?? entry.publicDescription ?? ""),
+      secrets: String(entry.secrets ?? entry.hiddenTraits ?? ""),
+    };
+  }
+
+  if (inferredType === "variable") {
+    const rawDefaultValue = entry.defaultValue;
+    const inferredVarType =
+      entry.varType === "number" || entry.varType === "boolean"
+        ? (entry.varType as "number" | "boolean")
+        : typeof rawDefaultValue === "number"
+          ? "number"
+          : "boolean";
+
+    const normalizedDefaultValue =
+      inferredVarType === "number"
+        ? typeof rawDefaultValue === "number"
+          ? rawDefaultValue
+          : Number(rawDefaultValue ?? 0) || 0
+        : Boolean(rawDefaultValue);
+
+    return {
+      type: "variable",
+      varType: inferredVarType,
+      defaultValue: normalizedDefaultValue,
+    };
+  }
+
+  return {
+    type: "character",
+    role: String(entry.role ?? ""),
+    aliases: String(entry.aliases ?? ""),
+    publicDescription: String(entry.publicDescription ?? ""),
+    hiddenTraits: String(entry.hiddenTraits ?? ""),
+  };
+};
 
 
 const sanitizeFileName = (value: string): string =>
@@ -187,6 +339,8 @@ const GraphCanvas = memo(function GraphCanvas({
       nodes={canvasNodes}
       edges={flowEdges}
       nodeTypes={nodeTypes}
+      minZoom={0.05}
+      maxZoom={2}
       onInit={onInit}
       onNodesChange={onCanvasNodesChange}
       onConnect={onConnect}
@@ -210,7 +364,6 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeLayerTags, setActiveLayerTags] = useState<string[]>([]);
   const [selectedTagToAdd, setSelectedTagToAdd] = useState("");
-  const [newTagInput, setNewTagInput] = useState("");
   const [tagSearch, setTagSearch] = useState("");
   const [status, setStatus] = useState("Loading…");
   const [validationMessages, setValidationMessages] = useState<string[]>([]);
@@ -219,15 +372,15 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const [selectedLoreId, setSelectedLoreId] = useState<string | null>(null);
   const [activeLoreText, setActiveLoreText] = useState<string>("");
   const [loreViewMode, setLoreViewMode] = useState<"draft" | "structured">("draft");
-  const [loreStructuredEdit, setLoreStructuredEdit] = useState<StructuredLore>({ role: "", aliases: "", publicDescription: "", hiddenTraits: "" });
+  const [loreStructuredEdit, setLoreStructuredEdit] = useState<StructuredLore>(defaultCharacterLore());
+  const [newLoreEntityType, setNewLoreEntityType] = useState<LoreEntityType>("character");
+  const [newLoreEntityName, setNewLoreEntityName] = useState("");
   const [isStructurizing, setIsStructurizing] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [collapsedLayers, setCollapsedLayers] = useState<Record<string, boolean>>({});
   const [selectedFlowNodeIds, setSelectedFlowNodeIds] = useState<string[]>([]);
   const [selectedFlowEdgeIds, setSelectedFlowEdgeIds] = useState<string[]>([]);
   const [loreNewTag, setLoreNewTag] = useState("");
-  const [loreNewCharacter, setLoreNewCharacter] = useState("");
-  const [loreNewLocation, setLoreNewLocation] = useState("");
   const [lastExportPath, setLastExportPath] = useState("");
   const flowInstanceRef = useRef<ReactFlowInstance | null>(null);
   const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
@@ -279,39 +432,42 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<string>("pipeline-log", (event) => {
-      const line = event.payload;
-      if (line.startsWith("__PLOT_NODE_ACTIVE__:")) {
-        setActiveGenNodeId(line.split(":")[1]);
-      } else if (line.startsWith("__PLOT_NODE_GENERATED__:!")) {
-        // Just skip this, it's a fallback if regex failed but it shouldn't
-      } else if (line.startsWith("__PLOT_NODE_GENERATED__:")) {
-        const parts = line.split(":");
-        if (parts.length >= 3) {
-          const nodeId = parts[1];
-          const b64Text = parts.slice(2).join(":");
-          try {
-            const text = decodeURIComponent(escape(window.atob(b64Text)));
-            setProject((previous) => {
-              const node = previous.nodes[nodeId];
-              if (!node) return previous;
-              const nextNode = { ...node, data: { ...node.data, generated_text: text } } as PlotNode;
-              return { ...previous, nodes: { ...previous.nodes, [nodeId]: nextNode } };
-            });
-          } catch (e) {
-            console.error("Failed to decode generated text", e);
+    
+    if (isTauriAvailable()) {
+      listen<string>("pipeline-log", (event) => {
+        const line = event.payload;
+        if (line.startsWith("__PLOT_NODE_ACTIVE__:")) {
+          setActiveGenNodeId(line.split(":")[1]);
+        } else if (line.startsWith("__PLOT_NODE_GENERATED__:!")) {
+          // Just skip this, it's a fallback if regex failed but it shouldn't
+        } else if (line.startsWith("__PLOT_NODE_GENERATED__:")) {
+          const parts = line.split(":");
+          if (parts.length >= 3) {
+            const nodeId = parts[1];
+            const b64Text = parts.slice(2).join(":");
+            try {
+              const text = decodeURIComponent(escape(window.atob(b64Text)));
+              setProject((previous) => {
+                const node = previous.nodes[nodeId];
+                if (!node) return previous;
+                const nextNode = { ...node, data: { ...node.data, generated_text: text } } as PlotNode;
+                return { ...previous, nodes: { ...previous.nodes, [nodeId]: nextNode } };
+              });
+            } catch (e) {
+              console.error("Failed to decode generated text", e);
+            }
           }
+        } else if (line.startsWith("__PIPELINE_COMPLETE__") || line.startsWith("__PIPELINE_ERROR__")) {
+          setIsGenerating(false);
+          setActiveGenNodeId(null);
+          setGenerationLogs((prev) => [...prev, line]);
+        } else {
+          setGenerationLogs((prev) => [...prev, line]);
         }
-      } else if (line.startsWith("__PIPELINE_COMPLETE__") || line.startsWith("__PIPELINE_ERROR__")) {
-        setIsGenerating(false);
-        setActiveGenNodeId(null);
-        setGenerationLogs((prev) => [...prev, line]);
-      } else {
-        setGenerationLogs((prev) => [...prev, line]);
-      }
-    }).then((f) => {
-      unlisten = f;
-    });
+      }).then((f) => {
+        unlisten = f;
+      });
+    }
 
     return () => {
       if (unlisten) unlisten();
@@ -321,78 +477,80 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
-    listen<unknown>("agent-event", (event) => {
-      const rawPayload = event.payload;
-      const payload = typeof rawPayload === "string"
-        ? (() => {
-            try {
-              return JSON.parse(rawPayload) as Record<string, unknown>;
-            } catch {
-              return null;
-            }
-          })()
-        : (rawPayload as Record<string, unknown> | null);
+    if (isTauriAvailable()) {
+      listen<unknown>("agent-event", (event) => {
+        const rawPayload = event.payload;
+        const payload = typeof rawPayload === "string"
+          ? (() => {
+              try {
+                return JSON.parse(rawPayload) as Record<string, unknown>;
+              } catch {
+                return null;
+              }
+            })()
+          : (rawPayload as Record<string, unknown> | null);
 
-      if (!payload || typeof payload !== "object") {
-        return;
-      }
-
-      if (payload.type === "agent:status") {
-        const nextStatus = payload.status;
-        const nextMessage = typeof payload.message === "string" ? payload.message : "";
-
-        if (nextStatus === "planning" || nextStatus === "executing" || nextStatus === "completed" || nextStatus === "error" || nextStatus === "idle") {
-          setAgentStatus(nextStatus);
+        if (!payload || typeof payload !== "object") {
+          return;
         }
-        setAgentStatusMessage(nextMessage);
-        // If execution finished and we have staged mutations, show approval UI
-        if (nextStatus === "completed" && stagedMutationsRef.current.length > 0) {
-          setIsAwaitingApproval(true);
+
+        if (payload.type === "agent:status") {
+          const nextStatus = payload.status;
+          const nextMessage = typeof payload.message === "string" ? payload.message : "";
+
+          if (nextStatus === "planning" || nextStatus === "executing" || nextStatus === "completed" || nextStatus === "error" || nextStatus === "idle") {
+            setAgentStatus(nextStatus);
+          }
+          setAgentStatusMessage(nextMessage);
+          // If execution finished and we have staged mutations, show approval UI
+          if (nextStatus === "completed" && stagedMutationsRef.current.length > 0) {
+            setIsAwaitingApproval(true);
+          }
         }
-      }
 
-      if (payload.type === "agent:todo") {
-        const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
-        setAgentTasks(
-          tasks
-            .filter((task): task is AgentTask => Boolean(task) && typeof task === "object")
-            .map((task, index) => ({
-              id: Number((task as Record<string, unknown>).id ?? index + 1),
-              desc: String((task as Record<string, unknown>).desc ?? ""),
-              status: String((task as Record<string, unknown>).status ?? "pending"),
-            })),
-        );
-        setAgentStatus("completed");
-        setAgentStatusMessage("Planning complete.");
-      }
+        if (payload.type === "agent:todo") {
+          const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+          setAgentTasks(
+            tasks
+              .filter((task): task is AgentTask => Boolean(task) && typeof task === "object")
+              .map((task, index) => ({
+                id: Number((task as Record<string, unknown>).id ?? index + 1),
+                desc: String((task as Record<string, unknown>).desc ?? ""),
+                status: String((task as Record<string, unknown>).status ?? "pending"),
+              })),
+          );
+          setAgentStatus("completed");
+          setAgentStatusMessage("Planning complete.");
+        }
 
-      if (payload.type === "agent:mutation") {
-        // Stage mutations for human approval instead of applying directly
-        setStagedMutations((prev) => {
-          const next = [...prev, payload as AgentMutationRecord];
-          stagedMutationsRef.current = next;
-          return next;
-        });
-      }
+        if (payload.type === "agent:mutation") {
+          // Stage mutations for human approval instead of applying directly
+          setStagedMutations((prev) => {
+            const next = [...prev, payload as AgentMutationRecord];
+            stagedMutationsRef.current = next;
+            return next;
+          });
+        }
 
-      if (payload.type === "agent:task_update") {
-        const taskId = Number(payload.task_id);
-        const nextStatus = String(payload.status ?? "pending");
+        if (payload.type === "agent:task_update") {
+          const taskId = Number(payload.task_id);
+          const nextStatus = String(payload.status ?? "pending");
 
-        setAgentTasks((previous) =>
-          previous.map((task) =>
-            task.id === taskId
-              ? {
-                  ...task,
-                  status: nextStatus,
-                }
-              : task,
-          ),
-        );
-      }
-    }).then((f) => {
-      unlisten = f;
-    });
+          setAgentTasks((previous) =>
+            previous.map((task) =>
+              task.id === taskId
+                ? {
+                    ...task,
+                    status: nextStatus,
+                  }
+                : task,
+            ),
+          );
+        }
+      }).then((f) => {
+        unlisten = f;
+      });
+    }
 
     return () => {
       if (unlisten) unlisten();
@@ -408,6 +566,11 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     // Reset autosave baseline so loading doesn't trigger a false save
     isInitialLoadRef.current = true;
     projectSnapshotRef.current = "";
+
+    if (!isTauriAvailable()) {
+      setStatus("Web mode — using default project");
+      return;
+    }
 
     invoke<string>("load_project_json", { path: projectPath })
       .then((raw) => {
@@ -826,10 +989,39 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     setPlayModeNodeId(nextNodeId);
   };
 
+  const variableIds = useMemo(() => {
+    const fromFlags = project.globalFlags ?? [];
+    const fromStructured = Object.entries(project.loreStructured ?? {})
+      .filter(([, entry]) => entry?.type === "variable")
+      .map(([id]) => id);
+    return dedupe([...fromFlags, ...fromStructured]);
+  }, [project.globalFlags, project.loreStructured]);
+
+  const getLoreEntityTypeById = (id: string): LoreEntityType | "tag" => {
+    if (project.characters.some((item) => item.id === id)) {
+      return "character";
+    }
+    if (project.locations.some((item) => item.id === id)) {
+      return "location";
+    }
+    if (variableIds.includes(id)) {
+      return "variable";
+    }
+    return "tag";
+  };
+
+  const getNormalizedLoreEntry = (id: string): StructuredLore =>
+    normalizeStructuredLoreEntry(
+      id,
+      project.loreStructured?.[id],
+      project.locations,
+      variableIds,
+    );
+
   const loadLoreText = (id: string) => {
     setSelectedLoreId(id);
     setActiveLoreText(project.lore?.[id] || "");
-    setLoreStructuredEdit(project.loreStructured?.[id] ?? { role: "", aliases: "", publicDescription: "", hiddenTraits: "" });
+    setLoreStructuredEdit(getNormalizedLoreEntry(id));
     setLoreViewMode("draft");
   };
 
@@ -843,91 +1035,107 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       },
       loreStructured: {
         ...(prev.loreStructured || {}),
-        [selectedLoreId]: loreStructuredEdit,
+        [selectedLoreId]: loreStructuredEdit.type ? loreStructuredEdit : { ...loreStructuredEdit, type: "character" },
       },
     }));
     setStatus(`Saved lore for ${selectedLoreId}`);
   };
 
-  const addLoreEntity = (type: "tag" | "character" | "location", value: string) => {
+  const addLoreEntity = (type: "tag" | "character" | "location" | "variable", value: string) => {
     const slug = createSlug(value);
     if (!slug) return;
     
     commitProject((prev) => {
       const lore = { ...prev.lore, [slug]: "" };
+      const loreStructured = { ...(prev.loreStructured || {}) };
       if (type === "tag" && !prev.layerPresets.includes(slug)) {
         return { ...prev, layerPresets: [...prev.layerPresets, slug], lore };
       }
       if (type === "character" && !prev.characters.some(c => c.id === slug)) {
-        return { ...prev, characters: [...prev.characters, { id: slug, icon: "" }], lore };
+        loreStructured[slug] = createDefaultStructuredLore("character");
+        return { ...prev, characters: [...prev.characters, { id: slug, icon: "" }], lore, loreStructured };
       }
       if (type === "location" && !prev.locations.some(l => l.id === slug)) {
-        return { ...prev, locations: [...prev.locations, { id: slug, title: value, preview: "" }], lore };
+        loreStructured[slug] = createDefaultStructuredLore("location");
+        return { ...prev, locations: [...prev.locations, { id: slug, title: value, preview: "" }], lore, loreStructured };
+      }
+      if (type === "variable" && !prev.globalFlags.includes(slug)) {
+        loreStructured[slug] = createDefaultStructuredLore("variable");
+        return { ...prev, globalFlags: [...prev.globalFlags, slug], lore, loreStructured };
       }
       return prev;
     });
 
     if (type === "tag") setLoreNewTag("");
-    if (type === "character") setLoreNewCharacter("");
-    if (type === "location") setLoreNewLocation("");
+    if (type !== "tag") {
+      setNewLoreEntityName("");
+    }
   };
 
-  const deleteLoreEntity = (type: "tag" | "character" | "location", id: string) => {
+  const deleteLoreEntity = (type: "tag" | "character" | "location" | "variable", id: string) => {
     commitProject((prev) => {
       const lore = { ...prev.lore };
+      const loreStructured = { ...(prev.loreStructured || {}) };
       delete lore[id];
+      delete loreStructured[id];
       if (type === "tag") {
         return { ...prev, layerPresets: prev.layerPresets.filter(t => t !== id), lore };
       }
       if (type === "character") {
-        return { ...prev, characters: prev.characters.filter(c => c.id !== id), lore };
+        return { ...prev, characters: prev.characters.filter(c => c.id !== id), lore, loreStructured };
       }
       if (type === "location") {
-        return { ...prev, locations: prev.locations.filter(l => l.id !== id), lore };
+        return { ...prev, locations: prev.locations.filter(l => l.id !== id), lore, loreStructured };
+      }
+      if (type === "variable") {
+        return { ...prev, globalFlags: prev.globalFlags.filter(flag => flag !== id), lore, loreStructured };
       }
       return prev;
     });
     if (selectedLoreId === id) {
       setSelectedLoreId(null);
       setActiveLoreText("");
-      setLoreStructuredEdit({ role: "", aliases: "", publicDescription: "", hiddenTraits: "" });
+      setLoreStructuredEdit(defaultCharacterLore());
     }
   };
 
-  const getSelectedLoreEntityType = (): "character" | "location" | "tag" => {
+  const getSelectedLoreEntityType = (): LoreEntityType | "tag" => {
     if (!selectedLoreId) return "character";
-    if (project.characters.some(c => c.id === selectedLoreId)) return "character";
-    if (project.locations.some(l => l.id === selectedLoreId)) return "location";
-    return "tag";
+    return getLoreEntityTypeById(selectedLoreId);
   };
 
   const structurizeWithAI = async () => {
     if (!selectedLoreId || !activeLoreText.trim()) return;
+    const entityType = getSelectedLoreEntityType();
+    if (entityType === "variable" || entityType === "tag") {
+      setStatus("AI structurization is available only for Character and Location lore entries");
+      return;
+    }
+    if (!isTauriAvailable()) {
+      setStatus("Cannot run AI structurization in web mode");
+      setIsStructurizing(false);
+      return;
+    }
     setIsStructurizing(true);
     try {
-      const entityType = getSelectedLoreEntityType();
       const result = await invoke<string>("run_lore_parser", {
         draftText: activeLoreText,
         entityType,
       });
       const parsed = JSON.parse(result) as StructuredLore;
-      setLoreStructuredEdit({
-        role: parsed.role ?? "[Not specified]",
-        aliases: parsed.aliases ?? "[Not specified]",
-        publicDescription: parsed.publicDescription ?? "[Not specified]",
-        hiddenTraits: parsed.hiddenTraits ?? "[Not specified]",
-      });
+      const normalized = normalizeStructuredLoreEntry(
+        selectedLoreId,
+        { ...parsed, type: entityType },
+        project.locations,
+        variableIds,
+      );
+      setLoreStructuredEdit(normalized);
       // Auto-save structured data and switch to structured mode
       commitProject((prev) => ({
         ...prev,
         loreStructured: {
           ...(prev.loreStructured || {}),
-          [selectedLoreId]: {
-            role: parsed.role ?? "[Not specified]",
-            aliases: parsed.aliases ?? "[Not specified]",
-            publicDescription: parsed.publicDescription ?? "[Not specified]",
-            hiddenTraits: parsed.hiddenTraits ?? "[Not specified]",
-          },
+          [selectedLoreId]: normalized,
         },
       }));
       setLoreViewMode("structured");
@@ -1001,6 +1209,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       description: project.lore?.[location.id] || "",
     }));
 
+    const variableOptions: LoreContextItem[] = variableIds.map((variableId) => ({
+      key: `variable:${variableId}`,
+      kind: "Variable",
+      id: variableId,
+      label: `[Variable] ${titleize(variableId)}`,
+      description: project.lore?.[variableId] || "",
+    }));
+
     const tagOptions: LoreContextItem[] = (project.layerPresets || []).map((tag) => ({
       key: `tag:${tag}`,
       kind: "Tag",
@@ -1009,8 +1225,8 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       description: project.lore?.[tag] || "",
     }));
 
-    return [...characterOptions, ...locationOptions, ...tagOptions];
-  }, [project.characters, project.layerPresets, project.locations, project.lore]);
+    return [...characterOptions, ...locationOptions, ...variableOptions, ...tagOptions];
+  }, [project.characters, project.layerPresets, project.locations, project.lore, variableIds]);
 
   const selectedLoreContextItems = useMemo(
     () => loreContextOptions.filter((item) => selectedLoreContext.includes(item.key)),
@@ -1044,11 +1260,17 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       }
 
       if (!edges.has(id)) {
+        const sourceNode = allNodes.find((n) => n.id === source);
+        const edgeColor = sourceNode && sourceNode.type === "Route" 
+          ? (sourceNode as RouteNode).parameters.color 
+          : undefined;
+
         edges.set(id, {
           id,
           source,
           target,
           sourceHandle,
+          ...(edgeColor && { style: { stroke: edgeColor, strokeWidth: 2 } }),
         });
       }
     };
@@ -1093,6 +1315,8 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   }, [allNodes, visibleNodeIds]);
 
   const selectedNode = selectedNodeId ? project.nodes[selectedNodeId] ?? null : null;
+  const selectedLoreType = selectedLoreId ? getLoreEntityTypeById(selectedLoreId) : null;
+  const canUseStructuredLore = selectedLoreType === "character" || selectedLoreType === "location" || selectedLoreType === "variable";
 
   const updateNode = (nodeId: string, updater: (node: PlotNode) => PlotNode) => {
     commitProject((previous) => {
@@ -1129,7 +1353,13 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     }
 
     if (mutation.action === "ADD_LORE") {
-      const entityLabel = mutation.entityType === "character" ? "Character" : mutation.entityType === "location" ? "Location" : "Tag";
+      const entityLabel = mutation.entityType === "character"
+        ? "Character"
+        : mutation.entityType === "location"
+          ? "Location"
+          : mutation.entityType === "variable"
+            ? "Variable"
+            : "Tag";
       return `✨ Create ${entityLabel}: ${mutation.payload.name}`;
     }
 
@@ -1166,6 +1396,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
             if (!next.locations.some((location) => location.id === payload.id)) {
               next.locations = [...next.locations, { id: payload.id, title: payload.name, preview: "" }];
             }
+          } else if (entityType === "variable") {
+            if (!next.globalFlags.includes(payload.id)) {
+              next.globalFlags = [...next.globalFlags, payload.id];
+            }
+            next.loreStructured = {
+              ...(next.loreStructured || {}),
+              [payload.id]: createDefaultStructuredLore("variable"),
+            };
           } else if (!next.layerPresets.includes(payload.id)) {
             next.layerPresets = [...next.layerPresets, payload.id];
           }
@@ -1445,28 +1683,6 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     }));
   };
 
-  const addNewTag = () => {
-    const value = newTagInput.trim();
-    if (!value || !selectedNodeId) {
-      return;
-    }
-
-    commitProject((previous) => ({
-      ...previous,
-      layerPresets: dedupe([...previous.layerPresets, value]),
-      nodes: {
-        ...previous.nodes,
-        [selectedNodeId]: {
-          ...previous.nodes[selectedNodeId],
-          layerTags: dedupe([...previous.nodes[selectedNodeId].layerTags, value]),
-        },
-      },
-    }));
-
-    setSelectedTagToAdd(value);
-    setNewTagInput("");
-  };
-
   const removeNodeTag = (tag: string) => {
     if (!selectedNodeId) {
       return;
@@ -1485,6 +1701,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   };
 
   const saveProject = useCallback(async (proj?: PlotProject) => {
+    if (!isTauriAvailable()) {
+      setStatus("Cannot save in web mode");
+      return;
+    }
     const payload = JSON.stringify(proj ?? project, null, 2);
     try {
       await invoke("save_project_json", { path: projectPath, payload });
@@ -1495,6 +1715,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   }, [project, projectPath]);
 
   const exportProject = async () => {
+    if (!isTauriAvailable()) {
+      setStatus("Cannot export in web mode");
+      return;
+    }
     const fileName = await dialogSave({
       defaultPath: `project-${Date.now()}.plot.json`,
       filters: [{ name: "Plot Project", extensions: ["json"] }],
@@ -1515,6 +1739,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   };
 
   const exportModularProject = async () => {
+    if (!isTauriAvailable()) {
+      setStatus("Cannot export in web mode");
+      return;
+    }
     try {
       const payload: Record<string, string> = {};
       let exportDir = lastExportDir;
@@ -1577,6 +1805,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const runGeneration = async () => {
     if (!lastExportPath) {
       alert("Please Export Modular first.");
+      return;
+    }
+    if (!isTauriAvailable()) {
+      setStatus("Cannot run generation in web mode");
       return;
     }
     setGenerationLogs(["Starting AI generation..."]);
@@ -1812,14 +2044,58 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
   const selectedNodePreview = selectedNode?.type === "Scene" ? (selectedNode as SceneNode) : null;
   const selectedActPreview = selectedNode?.type === "Act" ? (selectedNode as ActNode) : null;
-  const actOverrideTargetOptions = useMemo(
-    () => [
-      ...project.characters.map((character) => ({ id: character.id, label: `Character: ${character.id}` })),
-      ...project.locations.map((location) => ({ id: location.id, label: `Location: ${location.title}` })),
-    ],
-    [project.characters, project.locations],
-  );
+  const ACT_CHARACTER_FIELDS = ["role", "aliases", "publicDescription", "hiddenTraits"] as const;
+  const ACT_LOCATION_FIELDS = ["region", "landmarks", "atmosphere", "secrets"] as const;
+  const isMissingActOverrideTarget = (targetId: string, entities: LoreEntityOption[]): boolean =>
+    Boolean(targetId && !entities.find((entity) => entity.id === targetId));
+  const actOverrideTargetOptions = useMemo<LoreEntityOption[]>(() => {
+    const variableTargets: LoreEntityOption[] = variableIds.map((variableId) => {
+      const loreEntry = normalizeStructuredLoreEntry(
+        variableId,
+        project.loreStructured?.[variableId],
+        project.locations,
+        variableIds,
+      );
+      return {
+        id: variableId,
+        label: `🧮 Variable: ${variableId}`,
+        type: "variable",
+        variableType: loreEntry.type === "variable" ? loreEntry.varType : "boolean",
+      };
+    });
 
+    return [
+      ...project.characters.map((character) => ({ id: character.id, label: `👤 Character: ${character.id}`, type: "character" as const })),
+      ...project.locations.map((location) => ({ id: location.id, label: `📍 Location: ${location.title || location.id}`, type: "location" as const })),
+      ...variableTargets,
+    ];
+  }, [project.characters, project.locations, project.loreStructured, variableIds]);
+  const getActOverrideTarget = (targetId: string): LoreEntityOption | undefined =>
+    actOverrideTargetOptions.find((entity) => entity.id === targetId);
+  const getActOverridePropertyOptions = (targetType?: LoreEntityOption["type"]): string[] => {
+    if (targetType === "character") {
+      return [...ACT_CHARACTER_FIELDS];
+    }
+    if (targetType === "location") {
+      return [...ACT_LOCATION_FIELDS];
+    }
+    if (targetType === "variable") {
+      return ["value"];
+    }
+    return [];
+  };
+  const getActOverrideDefaultsForTarget = (target?: LoreEntityOption): Pick<NodeOverride, "property" | "newValue"> => {
+    if (!target) {
+      return { property: "", newValue: "" };
+    }
+    if (target.type === "character") {
+      return { property: ACT_CHARACTER_FIELDS[0], newValue: "" };
+    }
+    if (target.type === "location") {
+      return { property: ACT_LOCATION_FIELDS[0], newValue: "" };
+    }
+    return { property: "value", newValue: target.variableType === "number" ? "0" : "false" };
+  };
   const updateActOverride = (overrideId: string, patch: Partial<NodeOverride>) => {
     if (!selectedNodeId || !selectedActPreview) {
       return;
@@ -1849,12 +2125,14 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       return;
     }
 
-    const defaultTargetId = actOverrideTargetOptions[0]?.id ?? "";
+    const defaultTarget = actOverrideTargetOptions[0];
+    const defaultTargetId = defaultTarget?.id ?? "";
+    const defaults = getActOverrideDefaultsForTarget(defaultTarget);
     const nextOverride: NodeOverride = {
       id: `override_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
       targetId: defaultTargetId,
-      property: "Status",
-      newValue: "",
+      property: defaults.property,
+      newValue: defaults.newValue,
     };
 
     updateNode(selectedNodeId, (node) => {
@@ -1928,11 +2206,13 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   // Autosave then return to project selection
   const handleBack = useCallback(async () => {
     setStatus("Saving before exit...");
-    try {
-      const payload = JSON.stringify(latestProjectRef.current, null, 2);
-      await invoke("save_project_json", { path: projectPath, payload });
-    } catch (e) {
-      console.error("Failed to save on exit", e);
+    if (isTauriAvailable()) {
+      try {
+        const payload = JSON.stringify(latestProjectRef.current, null, 2);
+        await invoke("save_project_json", { path: projectPath, payload });
+      } catch (e) {
+        console.error("Failed to save on exit", e);
+      }
     }
     onBack();
   }, [projectPath, onBack]);
@@ -1961,7 +2241,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     }
 
     autosaveTimerRef.current = setTimeout(async () => {
-      if (!projectPath) return;
+      if (!projectPath || !isTauriAvailable()) return;
 
       try {
         setAutosaveStatus("saving");
@@ -1993,6 +2273,30 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
   const handleEventInspectorChange = (nextEventNode: EventNode) => {
     updateNode(nextEventNode.id, () => nextEventNode);
   };
+
+  // Build lore entities for smart dropdowns in inspectors
+  const loreEntities = useMemo<LoreEntityOption[]>(() => {
+    const variableEntities: LoreEntityOption[] = variableIds.map((variableId) => {
+      const loreEntry = normalizeStructuredLoreEntry(
+        variableId,
+        project.loreStructured?.[variableId],
+        project.locations,
+        variableIds,
+      );
+      return {
+        id: variableId,
+        label: `Variable: ${variableId}`,
+        type: "variable",
+        variableType: loreEntry.type === "variable" ? loreEntry.varType : "boolean",
+      };
+    });
+
+    return [
+      ...project.characters.map((char) => ({ id: char.id, label: `👤 Character: ${char.id}`, type: "character" as const })),
+      ...project.locations.map((loc) => ({ id: loc.id, label: `📍 Location: ${loc.title || loc.id}`, type: "location" as const })),
+      ...variableEntities,
+    ];
+  }, [project.characters, project.locations, project.loreStructured, variableIds]);
 
   useEffect(() => {
     if (!isProjectSettingsOpen || !globalStylePromptRef.current) {
@@ -2079,15 +2383,20 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
     setStatus(`AI Co-pilot planning: ${selectedNodesForChat.length} selected node(s)`);
     setAiChatDraft("");
 
-    void invoke("run_agent_planner", {
-      prompt,
-      contextJson: JSON.stringify(structuredPromptPackage),
-    }).then(() => {
-      setSelectedLoreContext([]);
-    }).catch((error) => {
+    if (isTauriAvailable()) {
+      void invoke("run_agent_planner", {
+        prompt,
+        contextJson: JSON.stringify(structuredPromptPackage),
+      }).then(() => {
+        setSelectedLoreContext([]);
+      }).catch((error) => {
+        setAgentStatus("error");
+        setAgentStatusMessage(`Failed to start planner: ${String(error)}`);
+      });
+    } else {
       setAgentStatus("error");
-      setAgentStatusMessage(`Failed to start planner: ${String(error)}`);
-    });
+      setAgentStatusMessage("AI planning not available in web mode");
+    }
   };
 
   return (
@@ -2247,9 +2556,6 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
           >
             ▶ Play from Selected
           </button>
-          <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); setActiveLayerTags([]); }}>
-            Switch Layer: Global
-          </button>
           <button type="button" className="rounded-md bg-slate-700 px-3 py-1 text-sm" onClick={(e) => { e.preventDefault(); undo(); }}>
             Undo
           </button>
@@ -2266,7 +2572,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
       <main className="grid grid-cols-[20%_60%_20%]" style={{ flex: 1, minHeight: 0 }}>
               {/* Play Mode Modal */}
               {playModeNodeId && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-8">
+                <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/80 p-4 md:p-8">
                   {(() => {
                     const currentNode = project.nodes[playModeNodeId];
                     if (!currentNode) {
@@ -2288,108 +2594,111 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     const isScene = currentNode.type === "Scene";
 
                     return (
-                      <div className="relative flex w-full max-w-3xl flex-col gap-4 rounded-2xl border border-slate-600 bg-gradient-to-b from-slate-900 to-slate-950 p-8 text-slate-100 shadow-2xl">
-                        {/* Close button */}
-                        <button
-                          type="button"
-                          className="absolute right-4 top-4 rounded-md bg-slate-700 px-3 py-1 text-sm hover:bg-slate-600"
-                          onClick={() => setPlayModeNodeId(null)}
-                        >
-                          ✕ Close
-                        </button>
-
+                      <div className="relative flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-600 bg-gradient-to-b from-slate-900 to-slate-950 text-slate-100 shadow-2xl">
                         {/* Node title/name */}
-                        <div className="pr-12">
-                          <div className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
+                        <div className="border-b border-slate-700/60 px-6 pb-4 pt-6 md:px-8">
+                          <div className="text-xs font-semibold uppercase tracking-widest text-slate-400">
                             {currentNode.type}
                           </div>
                           <h2 className="mt-2 text-2xl font-bold text-slate-50">{currentNode.name}</h2>
                         </div>
 
-                        {/* Node content based on type */}
-                        <div className="flex-1 space-y-4 rounded-lg border border-slate-700/50 bg-slate-800/30 p-4">
-                          {isScene && (() => {
-                            const scene = currentNode as SceneNode;
-                            const generatedText = scene.data?.generated_text;
-                            return (
-                              <div className="space-y-3">
-                                {generatedText ? (
-                                  <p className="text-sm leading-relaxed text-slate-200 whitespace-pre-wrap">
-                                    {generatedText}
-                                  </p>
-                                ) : (
-                                  <p className="text-sm italic text-slate-400">
-                                    *[Scene not yet generated by AI]*
-                                  </p>
-                                )}
-                              </div>
-                            );
-                          })()}
+                        {/* Scrollable node content */}
+                        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4 md:px-8">
+                          <div className="space-y-4 rounded-lg border border-slate-700/50 bg-slate-800/30 p-4">
+                            {isScene && (() => {
+                              const scene = currentNode as SceneNode;
+                              const generatedText = scene.data?.generated_text;
+                              return (
+                                <div className="space-y-3">
+                                  {generatedText ? (
+                                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-200">
+                                      {generatedText}
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm italic text-slate-400">
+                                      *[Scene not yet generated by AI]*
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })()}
 
-                          {isBranchPoint && (() => {
-                            const branch = currentNode as BranchPointNode;
-                            return (
-                              <div className="space-y-2">
-                                <p className="text-sm text-slate-300">
-                                  {branch.parameters.conditionType === "playerChoice"
-                                    ? "What do you choose?"
-                                    : `Branching logic: ${branch.parameters.conditionType}`}
-                                </p>
-                              </div>
-                            );
-                          })()}
+                            {isBranchPoint && (() => {
+                              const branch = currentNode as BranchPointNode;
+                              return (
+                                <div className="space-y-2">
+                                  <p className="text-sm text-slate-300">
+                                    {branch.parameters.conditionType === "playerChoice"
+                                      ? "What do you choose?"
+                                      : `Branching logic: ${branch.parameters.conditionType}`}
+                                  </p>
+                                </div>
+                              );
+                            })()}
 
-                          {(currentNode.type === "Act" || currentNode.type === "Route" || currentNode.type === "Event") && (
-                            <div className="text-sm text-slate-300">
-                              {String((currentNode as ActNode | RouteNode | EventNode).parameters.description || `[${currentNode.type} node]`)}
-                            </div>
-                          )}
+                            {(currentNode.type === "Act" || currentNode.type === "Route" || currentNode.type === "Event") && (
+                              <div className="text-sm text-slate-300">
+                                {String((currentNode as ActNode | RouteNode | EventNode).parameters.description || `[${currentNode.type} node]`)}
+                              </div>
+                            )}
+                          </div>
                         </div>
 
-                        {/* Navigation buttons */}
-                        <div className="flex gap-3">
-                          {isBranchPoint && (() => {
-                            const branch = currentNode as BranchPointNode;
-                            return (
-                              <>
-                                {branch.parameters.choices.map((choice) => {
-                                  const nextNodeId = getChoiceTarget(playModeNodeId, choice.id);
-                                  return (
-                                    <button
-                                      key={choice.id}
-                                      type="button"
-                                      className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                                        nextNodeId
-                                          ? "bg-blue-600 hover:bg-blue-700"
-                                          : "bg-slate-600 cursor-not-allowed opacity-50"
-                                      }`}
-                                      onClick={() => handlePlayModeNavigate(nextNodeId)}
-                                      disabled={!nextNodeId}
-                                    >
-                                      {choice.text || "Unnamed Choice"}
-                                    </button>
-                                  );
-                                })}
-                              </>
-                            );
-                          })()}
+                        {/* Sticky footer actions */}
+                        <div className="sticky bottom-0 border-t border-slate-700/60 bg-slate-950/95 px-6 py-4 backdrop-blur md:px-8">
+                          <div className="flex flex-wrap gap-3">
+                            <button
+                              type="button"
+                              className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold transition-colors hover:bg-slate-600"
+                              onClick={() => setPlayModeNodeId(null)}
+                            >
+                              Close
+                            </button>
 
-                          {!isBranchPoint && (() => {
-                            const nextNodeId = getNextNodeForPlayMode(playModeNodeId);
-                            return (
-                              <button
-                                type="button"
-                                className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                                  nextNodeId
-                                    ? "bg-emerald-600 hover:bg-emerald-700"
-                                    : "bg-slate-600 cursor-not-allowed opacity-50"
-                                }`}
-                                onClick={() => handlePlayModeNavigate(nextNodeId)}
-                              >
-                                {nextNodeId ? "Continue →" : "End of Path"}
-                              </button>
-                            );
-                          })()}
+                            {isBranchPoint && (() => {
+                              const branch = currentNode as BranchPointNode;
+                              return (
+                                <>
+                                  {branch.parameters.choices.map((choice) => {
+                                    const nextNodeId = getChoiceTarget(playModeNodeId, choice.id);
+                                    return (
+                                      <button
+                                        key={choice.id}
+                                        type="button"
+                                        className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                                          nextNodeId
+                                            ? "bg-blue-600 hover:bg-blue-700"
+                                            : "cursor-not-allowed bg-slate-600 opacity-50"
+                                        }`}
+                                        onClick={() => handlePlayModeNavigate(nextNodeId)}
+                                        disabled={!nextNodeId}
+                                      >
+                                        {choice.text || "Unnamed Choice"}
+                                      </button>
+                                    );
+                                  })}
+                                </>
+                              );
+                            })()}
+
+                            {!isBranchPoint && (() => {
+                              const nextNodeId = getNextNodeForPlayMode(playModeNodeId);
+                              return (
+                                <button
+                                  type="button"
+                                  className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                                    nextNodeId
+                                      ? "bg-emerald-600 hover:bg-emerald-700"
+                                      : "cursor-not-allowed bg-slate-600 opacity-50"
+                                  }`}
+                                  onClick={() => handlePlayModeNavigate(nextNodeId)}
+                                >
+                                  {nextNodeId ? "Continue →" : "End of Path"}
+                                </button>
+                              );
+                            })()}
+                          </div>
                         </div>
                       </div>
                     );
@@ -2488,12 +2797,12 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
               </div>
 
               {isAwaitingApproval && (
-                <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-900/20 p-3">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
+                <div className="mb-3 flex max-h-[45vh] flex-col overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-900/20 p-3">
+                  <div className="flex min-h-0 flex-1 items-start justify-between gap-4 overflow-hidden">
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                       <div className="text-sm font-semibold text-amber-200">Review Changes</div>
                       <div className="text-xs text-amber-300">{stagedMutations.length} proposed change(s) from the agent pending your approval.</div>
-                      <div className="mt-3 space-y-2">
+                      <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-2">
                         {stagedMutations.map((mutation, index) => (
                           <div key={`${mutation.action}-${mutation.node_id ?? mutation.edge?.id ?? index}`} className="rounded-lg border border-amber-500/20 bg-slate-950/50 px-3 py-2 text-xs text-amber-50">
                             <div className="font-semibold text-amber-100">{summarizeMutation(mutation)}</div>
@@ -2524,7 +2833,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                         </div>
                       ) : null}
                     </div>
-                    <div className="flex gap-2">
+                    <div className="shrink-0 flex gap-2">
                       <button
                         type="button"
                         className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-semibold"
@@ -2761,7 +3070,7 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     <div className="flex flex-wrap gap-1 max-w-[65%]">
                       {selectedLoreContextItems.slice(0, 3).map((item) => (
                         <span key={item.key} className="inline-flex items-center rounded-full bg-fuchsia-500/10 border border-fuchsia-500/20 px-2 py-0.5 text-[10px] text-fuchsia-300">
-                          {item.kind === "Character" ? "👤" : item.kind === "Location" ? "📍" : "🏷️"} {item.id}
+                          {item.kind === "Character" ? "👤" : item.kind === "Location" ? "📍" : item.kind === "Variable" ? "🧮" : "🏷️"} {item.id}
                         </span>
                       ))}
                       {selectedLoreContextItems.length > 3 && (
@@ -2788,25 +3097,13 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
 
               <div className="mb-3 rounded-md border border-slate-700/70 bg-slate-950/70 p-2">
                 <div className="mb-2 text-xs font-semibold text-slate-400">Layer Filters</div>
-                <div className="mb-2 max-h-32 space-y-1 overflow-auto pr-1">
+                <div className="max-h-32 space-y-1 overflow-auto pr-1">
                   {layerCatalog.map((layer) => (
                     <label key={layer} className="flex items-center gap-2 text-xs text-slate-200">
                       <input type="checkbox" checked={activeLayerTags.includes(layer)} onChange={() => toggleLayer(layer)} />
                       <span>{layer}</span>
                     </label>
                   ))}
-                </div>
-
-                <div className="flex gap-2">
-                  <input
-                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
-                    placeholder="custom tag"
-                    value={newTagInput}
-                    onChange={(event) => setNewTagInput(event.target.value)}
-                  />
-                  <button className="rounded-md bg-slate-700 px-2 py-1 text-xs" onClick={addNewTag}>
-                    Create new tag
-                  </button>
                 </div>
               </div>
 
@@ -3046,15 +3343,6 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     value={tagSearch}
                     onChange={(event) => setTagSearch(event.target.value)}
                   />
-                  <input
-                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm"
-                    placeholder="new tag"
-                    value={newTagInput}
-                    onChange={(event) => setNewTagInput(event.target.value)}
-                  />
-                  <button className="w-full rounded-md bg-indigo-600 px-3 py-1 text-sm" onClick={addNewTag}>
-                    Create new tag
-                  </button>
                 </div>
               </div>
 
@@ -3085,62 +3373,98 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                   </label>
 
                   <div className="space-y-2">
-                    {selectedActPreview?.parameters.overrides.map((override) => (
-                      <div key={override.id} className="flex flex-col gap-2 rounded-lg border border-slate-700 bg-slate-800/60 p-2">
-                        <div className="text-[10px] text-slate-500 uppercase tracking-wide">Target</div>
-                        <select
-                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
-                          value={override.targetId}
-                          onChange={(event) => updateActOverride(override.id, { targetId: event.target.value })}
-                        >
-                          <option value="">Select target</option>
-                          <optgroup label="Characters">
-                            {project.characters.map((character) => (
-                              <option key={character.id} value={character.id}>
-                                {character.id}
+                    {selectedActPreview?.parameters.overrides.map((override) => {
+                      const targetEntity = getActOverrideTarget(override.targetId);
+                      const isVariableTarget = targetEntity?.type === "variable";
+                      const propertyOptions = getActOverridePropertyOptions(targetEntity?.type);
+                      const effectiveProperty = propertyOptions.includes(override.property) ? override.property : propertyOptions[0] ?? "";
+                      const missingTarget = isMissingActOverrideTarget(override.targetId, actOverrideTargetOptions);
+
+                      return (
+                        <div key={override.id} className="flex flex-col gap-2 rounded-lg border border-slate-700 bg-slate-800/60 p-2">
+                          <div className="text-[10px] text-slate-500 uppercase tracking-wide">Target</div>
+                          <select
+                            className={`w-full rounded-md border ${
+                              missingTarget ? "border-red-500 bg-red-950" : "border-slate-700 bg-slate-900"
+                            } px-2 py-1 text-xs`}
+                            value={override.targetId}
+                            onChange={(event) => {
+                              const nextTarget = getActOverrideTarget(event.target.value);
+                              const defaults = getActOverrideDefaultsForTarget(nextTarget);
+                              updateActOverride(override.id, {
+                                targetId: event.target.value,
+                                property: defaults.property,
+                                newValue: defaults.newValue,
+                              });
+                            }}
+                          >
+                            <option value="">Select target</option>
+                            {actOverrideTargetOptions.map((entity) => (
+                              <option key={entity.id} value={entity.id}>
+                                {entity.label}
                               </option>
                             ))}
-                          </optgroup>
-                          <optgroup label="Locations">
-                            {project.locations.map((location) => (
-                              <option key={location.id} value={location.id}>
-                                {location.title}
+                          </select>
+                          {missingTarget && <div className="text-xs text-red-400">⚠ Missing reference: {override.targetId}</div>}
+
+                          <div className="text-[10px] text-slate-500 uppercase tracking-wide">Property</div>
+                          <select
+                            className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
+                            value={effectiveProperty}
+                            onChange={(event) => updateActOverride(override.id, { property: event.target.value })}
+                            disabled={propertyOptions.length === 0}
+                          >
+                            {propertyOptions.length === 0 ? <option value="">Select target first</option> : null}
+                            {propertyOptions.map((property) => (
+                              <option key={property} value={property}>
+                                {property}
                               </option>
                             ))}
-                          </optgroup>
-                        </select>
+                          </select>
 
-                        <div className="text-[10px] text-slate-500 uppercase tracking-wide">Property</div>
-                        <input
-                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
-                          list="act-override-properties"
-                          placeholder='e.g. "Status"'
-                          value={override.property}
-                          onChange={(event) => updateActOverride(override.id, { property: event.target.value })}
-                        />
+                          <div className="text-[10px] text-slate-500 uppercase tracking-wide">New Value</div>
+                          {isVariableTarget ? (
+                            targetEntity?.variableType === "number" ? (
+                              <input
+                                type="number"
+                                className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
+                                value={Number(override.newValue || "0")}
+                                onChange={(event) => updateActOverride(override.id, { newValue: String(Number(event.target.value)) })}
+                              />
+                            ) : (
+                              <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300">
+                                <input
+                                  type="checkbox"
+                                  checked={override.newValue === "true"}
+                                  onChange={(event) => updateActOverride(override.id, { newValue: String(event.target.checked) })}
+                                />
+                                True
+                              </label>
+                            )
+                          ) : (
+                            <textarea
+                              className="w-full resize-none min-h-[40px] max-h-[200px] overflow-y-auto bg-slate-800 border-slate-700 rounded border box-border px-2 py-1 text-xs"
+                              placeholder="New value"
+                              value={override.newValue}
+                              onInput={(e) => { e.currentTarget.style.height = "auto"; e.currentTarget.style.height = e.currentTarget.scrollHeight + "px"; }}
+                              onChange={(event) => updateActOverride(override.id, { newValue: event.target.value })}
+                            />
+                          )}
 
-                        <div className="text-[10px] text-slate-500 uppercase tracking-wide">New Value</div>
-                        <textarea
-                          className="w-full resize-none min-h-[40px] max-h-[200px] overflow-y-auto bg-slate-800 border-slate-700 rounded border box-border px-2 py-1 text-xs"
-                          placeholder="New value"
-                          value={override.newValue}
-                          onInput={(e) => { e.currentTarget.style.height = "auto"; e.currentTarget.style.height = e.currentTarget.scrollHeight + "px"; }}
-                          onChange={(event) => updateActOverride(override.id, { newValue: event.target.value })}
-                        />
-
-                        <button
-                          className="w-full rounded-md bg-rose-700 px-3 py-1 text-xs font-semibold text-white"
-                          onClick={() => removeActOverride(override.id)}
-                        >
-                          Remove Override
-                        </button>
-                      </div>
-                    ))}
+                          <button
+                            className="w-full rounded-md bg-rose-700 px-3 py-1 text-xs font-semibold text-white"
+                            onClick={() => removeActOverride(override.id)}
+                          >
+                            Remove Override
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   {selectedActPreview?.parameters.overrides.length === 0 ? (
                     <div className="rounded-md border border-dashed border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">
-                      No overrides yet. Add one to define a global modifier for characters or locations.
+                      No overrides yet. Add one to define a global modifier for characters, locations, or variables.
                     </div>
                   ) : null}
                 </div>
@@ -3497,9 +3821,9 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                   </label>
                 </div>
               ) : selectedNode.type === "Route" ? (
-                <RouteInspector route={selectedNode as RouteNode} onChange={handleRouteInspectorChange} />
+                <RouteInspector route={selectedNode as RouteNode} onChange={handleRouteInspectorChange} loreEntities={loreEntities} />
               ) : selectedNode.type === "Event" ? (
-                <EventInspector eventNode={selectedNode as EventNode} onChange={handleEventInspectorChange} />
+                <EventInspector eventNode={selectedNode as EventNode} onChange={handleEventInspectorChange} loreEntities={loreEntities} />
               ) : selectedNode.type === "BranchPoint" ? (
                 <div className="space-y-3 rounded-md border border-violet-400/30 bg-slate-950/70 p-3">
                   <div className="flex items-center justify-between gap-2">
@@ -3647,33 +3971,60 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
             </div>
           </div>
           <div>
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-300">Characters</h2>
-            <div className="flex gap-2 mb-2">
-              <input className="flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs" placeholder="New Character" value={loreNewCharacter} onChange={(e) => setLoreNewCharacter(e.target.value)} />
-              <button className="rounded bg-slate-700 px-2 py-1 text-xs" onClick={() => addLoreEntity("character", loreNewCharacter)}>+</button>
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-300">Lore Entries</h2>
+            <div className="mb-2 grid grid-cols-[1fr_1fr_auto] gap-2">
+              <select
+                className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
+                value={newLoreEntityType}
+                onChange={(e) => setNewLoreEntityType(e.target.value as LoreEntityType)}
+              >
+                <option value="character">Character</option>
+                <option value="location">Location</option>
+                <option value="variable">Variable</option>
+              </select>
+              <input
+                className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
+                placeholder={newLoreEntityType === "variable" ? "New Variable" : newLoreEntityType === "location" ? "New Location" : "New Character"}
+                value={newLoreEntityName}
+                onChange={(e) => setNewLoreEntityName(e.target.value)}
+              />
+              <button className="rounded bg-slate-700 px-2 py-1 text-xs" onClick={() => addLoreEntity(newLoreEntityType, newLoreEntityName)}>+</button>
             </div>
-            <div className="space-y-1 pl-2">
-              {project.characters.map((c) => (
-                <div key={c.id} className={`flex items-center justify-between rounded ${selectedLoreId === c.id ? "bg-slate-700 text-white" : "text-slate-400 hover:bg-slate-800"}`}>
-                  <button onClick={() => loadLoreText(c.id)} className="flex-1 text-left text-sm px-2 py-1">{c.id}</button>
-                  <button onClick={() => deleteLoreEntity("character", c.id)} className="px-2 text-xs text-rose-400 hover:text-rose-300">×</button>
-                </div>
-              ))}
+
+            <div className="mb-3">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Characters</div>
+              <div className="space-y-1 pl-2">
+                {project.characters.map((c) => (
+                  <div key={c.id} className={`flex items-center justify-between rounded ${selectedLoreId === c.id ? "bg-slate-700 text-white" : "text-slate-400 hover:bg-slate-800"}`}>
+                    <button onClick={() => loadLoreText(c.id)} className="flex-1 text-left text-sm px-2 py-1">{c.id}</button>
+                    <button onClick={() => deleteLoreEntity("character", c.id)} className="px-2 text-xs text-rose-400 hover:text-rose-300">×</button>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-          <div>
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-slate-300">Locations</h2>
-            <div className="flex gap-2 mb-2">
-              <input className="flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs" placeholder="New Location" value={loreNewLocation} onChange={(e) => setLoreNewLocation(e.target.value)} />
-              <button className="rounded bg-slate-700 px-2 py-1 text-xs" onClick={() => addLoreEntity("location", loreNewLocation)}>+</button>
+
+            <div className="mb-3">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Locations</div>
+              <div className="space-y-1 pl-2">
+                {project.locations.map((l) => (
+                  <div key={l.id} className={`flex items-center justify-between rounded ${selectedLoreId === l.id ? "bg-slate-700 text-white" : "text-slate-400 hover:bg-slate-800"}`}>
+                    <button onClick={() => loadLoreText(l.id)} className="flex-1 text-left text-sm px-2 py-1">{l.title || l.id}</button>
+                    <button onClick={() => deleteLoreEntity("location", l.id)} className="px-2 text-xs text-rose-400 hover:text-rose-300">×</button>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="space-y-1 pl-2">
-              {project.locations.map((l) => (
-                <div key={l.id} className={`flex items-center justify-between rounded ${selectedLoreId === l.id ? "bg-slate-700 text-white" : "text-slate-400 hover:bg-slate-800"}`}>
-                  <button onClick={() => loadLoreText(l.id)} className="flex-1 text-left text-sm px-2 py-1">{l.id}</button>
-                  <button onClick={() => deleteLoreEntity("location", l.id)} className="px-2 text-xs text-rose-400 hover:text-rose-300">×</button>
-                </div>
-              ))}
+
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Variables</div>
+              <div className="space-y-1 pl-2">
+                {variableIds.map((variableId) => (
+                  <div key={variableId} className={`flex items-center justify-between rounded ${selectedLoreId === variableId ? "bg-slate-700 text-white" : "text-slate-400 hover:bg-slate-800"}`}>
+                    <button onClick={() => loadLoreText(variableId)} className="flex-1 text-left text-sm px-2 py-1">{variableId}</button>
+                    <button onClick={() => deleteLoreEntity("variable", variableId)} className="px-2 text-xs text-rose-400 hover:text-rose-300">×</button>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </aside>
@@ -3682,7 +4033,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
             <>
               {/* Header row */}
               <div className="flex flex-wrap justify-between items-center mb-4 gap-3">
-                <h2 className="text-xl font-bold">Editing Lore: <span className="text-emerald-400">{selectedLoreId}</span></h2>
+                <h2 className="text-xl font-bold">
+                  Editing Lore: <span className="text-emerald-400">{selectedLoreId}</span>
+                  {selectedLoreType && <span className="ml-2 text-xs uppercase tracking-wide text-slate-400">({selectedLoreType})</span>}
+                </h2>
                 <div className="flex items-center gap-2">
                   {/* Mode toggle */}
                   <div className="flex rounded-md bg-slate-900 p-1 gap-1">
@@ -3693,13 +4047,15 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     >
                       Draft Mode
                     </button>
-                    <button
-                      type="button"
-                      className={`rounded px-3 py-1 text-xs font-semibold transition-colors ${loreViewMode === "structured" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
-                      onClick={() => setLoreViewMode("structured")}
-                    >
-                      Structured Mode
-                    </button>
+                    {canUseStructuredLore && (
+                      <button
+                        type="button"
+                        className={`rounded px-3 py-1 text-xs font-semibold transition-colors ${loreViewMode === "structured" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                        onClick={() => setLoreViewMode("structured")}
+                      >
+                        Structured Mode
+                      </button>
+                    )}
                   </div>
                   <button
                     onClick={saveLoreText}
@@ -3721,10 +4077,10 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                   />
                   <button
                     type="button"
-                    disabled={isStructurizing || !activeLoreText.trim()}
+                    disabled={isStructurizing || !activeLoreText.trim() || !canUseStructuredLore || selectedLoreType === "variable"}
                     onClick={structurizeWithAI}
                     className={`self-start flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition-colors ${
-                      isStructurizing || !activeLoreText.trim()
+                      isStructurizing || !activeLoreText.trim() || !canUseStructuredLore || selectedLoreType === "variable"
                         ? "bg-violet-800/50 text-slate-400 cursor-not-allowed"
                         : "bg-violet-600 hover:bg-violet-500 text-white"
                     }`}
@@ -3736,59 +4092,168 @@ function ProjectEditor({ projectPath, projectName, onBack }: ProjectEditorProps)
                     )}
                   </button>
                   <p className="text-xs text-slate-500">
-                    The AI will extract structured fields (Role, Aliases, Public Description, Hidden Traits) from your draft and automatically switch to Structured Mode.
+                    {selectedLoreType === "location"
+                      ? "The AI will extract Region, Landmarks, Atmosphere, and Secrets from your draft and switch to Structured Mode."
+                      : "The AI will extract structured lore fields from your draft and switch to Structured Mode."}
                   </p>
                 </div>
               ) : (
                 /* ── Structured Mode ─────────────────────────────────── */
                 <div className="space-y-4 overflow-auto">
-                  <div>
-                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Role</label>
-                    <input
-                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
-                      value={loreStructuredEdit.role}
-                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, role: e.target.value }))}
-                      placeholder="e.g. Main antagonist, Comic relief, Quest giver…"
-                    />
-                  </div>
-                  <div>
-                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Aliases / Names</label>
-                    <input
-                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
-                      value={loreStructuredEdit.aliases}
-                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, aliases: e.target.value }))}
-                      placeholder="e.g. The Shadow, Lord Malachar, Mal…"
-                    />
-                  </div>
-                  <div>
-                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Public Description</label>
-                    <textarea
-                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 resize-none focus:outline-none focus:border-emerald-500"
-                      rows={4}
-                      value={loreStructuredEdit.publicDescription}
-                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, publicDescription: e.target.value }))}
-                      placeholder="What most characters know about this entity…"
-                    />
-                  </div>
-                  <div>
-                    <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Hidden Traits / Secrets</label>
-                    <textarea
-                      className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-rose-200 bg-rose-950/20 resize-none focus:outline-none focus:border-rose-500"
-                      rows={4}
-                      value={loreStructuredEdit.hiddenTraits}
-                      onChange={(e) => setLoreStructuredEdit(prev => ({ ...prev, hiddenTraits: e.target.value }))}
-                      placeholder="Secrets, hidden motivations, true nature — only revealed at key plot points…"
-                    />
-                  </div>
+                  {loreStructuredEdit.type === "character" && (
+                    <>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Role</label>
+                        <input
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                          value={loreStructuredEdit.role}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "character" ? prev : defaultCharacterLore()), type: "character", role: e.target.value }))}
+                          placeholder="e.g. Main antagonist, Comic relief, Quest giver…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Aliases / Names</label>
+                        <input
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                          value={loreStructuredEdit.aliases}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "character" ? prev : defaultCharacterLore()), type: "character", aliases: e.target.value }))}
+                          placeholder="e.g. The Shadow, Lord Malachar, Mal…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Public Description</label>
+                        <textarea
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 resize-none focus:outline-none focus:border-emerald-500"
+                          rows={4}
+                          value={loreStructuredEdit.publicDescription}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "character" ? prev : defaultCharacterLore()), type: "character", publicDescription: e.target.value }))}
+                          placeholder="What most characters know about this entity…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Hidden Traits / Secrets</label>
+                        <textarea
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-rose-200 bg-rose-950/20 resize-none focus:outline-none focus:border-rose-500"
+                          rows={4}
+                          value={loreStructuredEdit.hiddenTraits}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "character" ? prev : defaultCharacterLore()), type: "character", hiddenTraits: e.target.value }))}
+                          placeholder="Secrets, hidden motivations, true nature — only revealed at key plot points…"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {loreStructuredEdit.type === "location" && (
+                    <>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Region</label>
+                        <input
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                          value={loreStructuredEdit.region}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "location" ? prev : defaultLocationLore()), type: "location", region: e.target.value }))}
+                          placeholder="e.g. Northern Empire, Forgotten Coast…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Landmarks</label>
+                        <textarea
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 resize-none focus:outline-none focus:border-emerald-500"
+                          rows={3}
+                          value={loreStructuredEdit.landmarks}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "location" ? prev : defaultLocationLore()), type: "location", landmarks: e.target.value }))}
+                          placeholder="Major landmarks, districts, or points of interest…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Atmosphere</label>
+                        <textarea
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 resize-none focus:outline-none focus:border-emerald-500"
+                          rows={3}
+                          value={loreStructuredEdit.atmosphere}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "location" ? prev : defaultLocationLore()), type: "location", atmosphere: e.target.value }))}
+                          placeholder="Mood, climate, social vibe…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Secrets</label>
+                        <textarea
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-rose-200 bg-rose-950/20 resize-none focus:outline-none focus:border-rose-500"
+                          rows={4}
+                          value={loreStructuredEdit.secrets}
+                          onChange={(e) => setLoreStructuredEdit(prev => ({ ...(prev.type === "location" ? prev : defaultLocationLore()), type: "location", secrets: e.target.value }))}
+                          placeholder="Hidden lore, concealed routes, forbidden zones…"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {loreStructuredEdit.type === "variable" && (
+                    <>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Variable Type</label>
+                        <select
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                          value={loreStructuredEdit.varType}
+                          onChange={(e) => {
+                            const nextVarType = e.target.value as "number" | "boolean";
+                            setLoreStructuredEdit((prev) => ({
+                              ...(prev.type === "variable" ? prev : defaultVariableLore()),
+                              type: "variable",
+                              varType: nextVarType,
+                              defaultValue: nextVarType === "number" ? 0 : false,
+                            }));
+                          }}
+                        >
+                          <option value="number">number</option>
+                          <option value="boolean">boolean</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block mb-1 text-xs font-semibold text-slate-400 uppercase tracking-wide">Default Value</label>
+                        {loreStructuredEdit.varType === "number" ? (
+                          <input
+                            type="number"
+                            className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                            value={typeof loreStructuredEdit.defaultValue === "number" ? loreStructuredEdit.defaultValue : 0}
+                            onChange={(e) =>
+                              setLoreStructuredEdit((prev) => ({
+                                ...(prev.type === "variable" ? prev : defaultVariableLore()),
+                                type: "variable",
+                                varType: "number",
+                                defaultValue: Number(e.target.value),
+                              }))
+                            }
+                          />
+                        ) : (
+                          <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(loreStructuredEdit.defaultValue)}
+                              onChange={(e) =>
+                                setLoreStructuredEdit((prev) => ({
+                                  ...(prev.type === "variable" ? prev : defaultVariableLore()),
+                                  type: "variable",
+                                  varType: "boolean",
+                                  defaultValue: e.target.checked,
+                                }))
+                              }
+                            />
+                            True by default
+                          </label>
+                        )}
+                      </div>
+                    </>
+                  )}
+
                   <p className="text-xs text-slate-500">
-                    Switch to <strong className="text-slate-300">Draft Mode</strong> to edit the raw notes. Hit <strong className="text-slate-300">Save Details</strong> to persist both views.
+                    Switch to <strong className="text-slate-300">Draft Mode</strong> to edit raw notes. Hit <strong className="text-slate-300">Save Details</strong> to persist both views.
                   </p>
                 </div>
               )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-slate-500">
-              Select a tag, character, or location from the sidebar to edit its lore.
+              Select a tag, character, location, or variable from the sidebar to edit its lore.
             </div>
           )}
         </section>
